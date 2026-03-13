@@ -3,8 +3,8 @@
 NCAAB Data Builder
 ==================
 Pulls full-season game logs for 76 NCAAB teams from ESPN's API,
-fetches historical opening/closing odds from The Odds API, and
-outputs everything to CSV.
+fetches historical opening/closing odds from The Odds API, computes
+Point-In-Time (PIT) statistics, and outputs everything to CSV.
 
 Season: 2025-26 (ESPN season=2026)
 
@@ -79,6 +79,83 @@ TEAMS = [
     "Oklahoma", "Auburn", "Indiana", "New Mexico", "San Diego State",
     "Stanford", "Cincinnati", "Seton Hall",
 ]
+
+# ---------------------------------------------------------------------------
+# Conference map: canonical team name -> 2025-26 conference
+# ---------------------------------------------------------------------------
+
+CONFERENCE_MAP: dict[str, str] = {
+    # SEC (12 of 16)
+    "Florida": "SEC", "Alabama": "SEC", "Kentucky": "SEC",
+    "Tennessee": "SEC", "Georgia": "SEC", "Vanderbilt": "SEC",
+    "Missouri": "SEC", "Texas A&M": "SEC", "Auburn": "SEC",
+    "Oklahoma": "SEC", "Texas": "SEC", "Arkansas": "SEC",
+    # Big Ten
+    "Michigan": "Big Ten", "Illinois": "Big Ten", "Purdue": "Big Ten",
+    "Ohio State": "Big Ten", "Iowa": "Big Ten", "Wisconsin": "Big Ten",
+    "Nebraska": "Big Ten", "UCLA": "Big Ten", "Michigan State": "Big Ten",
+    "Indiana": "Big Ten",
+    # Big 12
+    "Arizona": "Big 12", "Houston": "Big 12", "Iowa State": "Big 12",
+    "Kansas": "Big 12", "Texas Tech": "Big 12", "TCU": "Big 12",
+    "BYU": "Big 12", "UCF": "Big 12", "Cincinnati": "Big 12",
+    # ACC
+    "Duke": "ACC", "North Carolina": "ACC", "Louisville": "ACC",
+    "Clemson": "ACC", "Virginia": "ACC", "Miami": "ACC",
+    "NC State": "ACC", "SMU": "ACC", "Stanford": "ACC",
+    # Big East
+    "St. John's": "Big East", "UConn": "Big East",
+    "Villanova": "Big East", "Seton Hall": "Big East",
+    # WCC
+    "Gonzaga": "WCC", "Saint Mary's": "WCC", "Santa Clara": "WCC",
+    # A-10
+    "VCU": "A-10", "Saint Louis": "A-10",
+    # Mountain West
+    "San Diego State": "Mountain West", "New Mexico": "Mountain West",
+    "Utah State": "Mountain West",
+    # AAC
+    "South Florida": "AAC",
+    # MVC
+    "Northern Iowa": "MVC",
+    # MAC
+    "Akron": "MAC", "Miami (OH)": "MAC",
+    # WAC
+    "Sam Houston": "WAC", "Utah Valley": "WAC",
+    # Big South
+    "High Point": "Big South",
+    # CAA
+    "Hofstra": "CAA",
+    # Sun Belt
+    "Troy": "Sun Belt",
+    # Ivy
+    "Yale": "Ivy",
+    # SoCon
+    "Furman": "SoCon",
+    # America East
+    "UMBC": "America East",
+    # SWAC
+    "Southern": "SWAC", "Howard": "SWAC",
+    # OVC
+    "Tennessee State": "OVC",
+    # NEC
+    "Long Island University": "NEC",
+    # Patriot
+    "Lehigh": "Patriot",
+    # Summit
+    "North Dakota State": "Summit",
+    # Big Sky
+    "Idaho": "Big Sky",
+    # Big West
+    "UC Irvine": "Big West",
+    # ASUN
+    "Queens": "ASUN",
+    # Horizon
+    "Wright State": "Horizon",
+    # Southland
+    "McNeese": "Southland",
+    # MAAC
+    "Siena": "MAAC",
+}
 
 # ---------------------------------------------------------------------------
 # Aliases: map a canonical short name to known ESPN display variants.
@@ -429,6 +506,9 @@ def fetch_schedule(team_id: str, team_name: str) -> list[dict]:
             except ValueError:
                 game_date = date_raw[:10]
 
+        # Neutral site flag
+        neutral_site = comp.get("neutralSite", False)
+
         # Determine competitors
         competitors = comp.get("competitors", [])
         team_comp = None
@@ -444,11 +524,19 @@ def fetch_schedule(team_id: str, team_name: str) -> list[dict]:
             continue
 
         home_away = team_comp.get("homeAway", "")
+        # Override home_away to "neutral" when the game is at a neutral site
+        if neutral_site:
+            home_away = "neutral"
+
         team_score = _extract_score(team_comp)
         opp_score = _extract_score(opp_comp)
 
         opp_name_full = opp_comp.get("team", {}).get("displayName", "")
         opp_name_short = opp_comp.get("team", {}).get("shortDisplayName", opp_name_full)
+        # Capture opponent ESPN team ID for later cross-referencing
+        opp_team_id = str(
+            opp_comp.get("id", opp_comp.get("team", {}).get("id", ""))
+        )
         win_loss = "W" if team_score > opp_score else ("L" if team_score < opp_score else "T")
 
         games.append({
@@ -456,7 +544,9 @@ def fetch_schedule(team_id: str, team_name: str) -> list[dict]:
             "date": game_date,
             "opponent": opp_name_full,
             "opponent_short": opp_name_short,
+            "opponent_id": opp_team_id,
             "home_away": home_away,
+            "neutral_site": neutral_site,
             "team_score": team_score,
             "opp_score": opp_score,
             "win_loss": win_loss,
@@ -730,6 +820,196 @@ def parse_odds_snapshot_1h(raw: dict | None, canonical_name: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# PIT (Point-In-Time) statistics computation
+# ---------------------------------------------------------------------------
+
+def _build_espn_id_to_canonical(team_ids: dict[str, str]) -> dict[str, str]:
+    """Build a reverse mapping: ESPN team ID -> canonical team name.
+
+    Only includes our 76 tracked teams.
+    """
+    return {tid: name for name, tid in team_ids.items()}
+
+
+def _is_conference_game(team_name: str, opp_team_id: str,
+                        espn_id_to_canonical: dict[str, str]) -> bool:
+    """Return True if the opponent is in the same conference as team_name."""
+    team_conf = CONFERENCE_MAP.get(team_name)
+    if not team_conf:
+        return False
+    opp_canonical = espn_id_to_canonical.get(opp_team_id)
+    if not opp_canonical:
+        return False
+    opp_conf = CONFERENCE_MAP.get(opp_canonical)
+    return team_conf == opp_conf
+
+
+def compute_pit_stats(
+    schedules: dict[str, list[dict]],
+    team_ids: dict[str, str],
+    odds_cache: dict[str, dict],
+) -> dict[str, dict[str, dict]]:
+    """Compute Point-In-Time stats for every team and game.
+
+    Returns: {canonical_team_name -> {event_id -> stats_dict}}
+
+    Each stats_dict contains records, ATS records, and PPG -- all reflecting
+    the team's performance PRIOR to the game identified by event_id.
+    """
+    espn_id_to_canonical = _build_espn_id_to_canonical(team_ids)
+
+    # ------------------------------------------------------------------
+    # Pre-compute closing spreads for every (team, game) so the PIT loop
+    # can use them for ATS tracking.
+    # ------------------------------------------------------------------
+    closing_spreads: dict[str, dict[str, float | None]] = {}
+    # closing_spreads[team_name][event_id] = closing spread value or None
+
+    def _find_closing_spread(date_str: str, team_name: str,
+                             opp_name: str) -> float | None:
+        """Extract only the closing spread for a game."""
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        hits: list[tuple[str, dict]] = []
+        for offset in range(-3, 4):
+            d = (dt + timedelta(days=offset)).strftime("%Y-%m-%d")
+            entry = odds_cache.get(d, {})
+            for snap_key in ["fg_open", "fg_close"]:
+                snap = entry.get(snap_key)
+                if not snap:
+                    continue
+                ts = snap.get("timestamp", "")
+                parsed = parse_odds_snapshot(snap, team_name, opp_hint=opp_name)
+                if parsed.get("spread") is not None:
+                    hits.append((ts, parsed))
+        if not hits:
+            return None
+        hits.sort(key=lambda x: x[0])
+        # Closing = last snapshot with a spread
+        for _, parsed in reversed(hits):
+            if parsed.get("spread") is not None:
+                return parsed["spread"]
+        return None
+
+    print(f"  [{_now_str()}] Pre-computing closing spreads for ATS ...")
+    for team_name in TEAMS:
+        closing_spreads[team_name] = {}
+        for g in schedules.get(team_name, []):
+            cs = _find_closing_spread(
+                g.get("date", ""), team_name, g.get("opponent", "")
+            )
+            closing_spreads[team_name][g["event_id"]] = cs
+
+    # ------------------------------------------------------------------
+    # Compute PIT stats per team
+    # ------------------------------------------------------------------
+    print(f"  [{_now_str()}] Computing PIT records, ATS, and PPG ...")
+    pit_stats: dict[str, dict[str, dict]] = {}
+
+    for team_name in TEAMS:
+        games = schedules.get(team_name, [])
+        sorted_games = sorted(games, key=lambda g: g["date"])
+
+        # Running win/loss counters
+        overall_w, overall_l = 0, 0
+        home_w, home_l = 0, 0
+        neutral_w, neutral_l = 0, 0
+        away_w, away_l = 0, 0
+
+        # Running ATS counters
+        ats_overall_w, ats_overall_l, ats_overall_p = 0, 0, 0
+        ats_home_w, ats_home_l, ats_home_p = 0, 0, 0
+        ats_neutral_w, ats_neutral_l, ats_neutral_p = 0, 0, 0
+        ats_away_w, ats_away_l, ats_away_p = 0, 0, 0
+
+        # Running PPG counters
+        total_pts, total_gp = 0, 0
+        home_pts, home_gp = 0, 0
+        neutral_pts, neutral_gp = 0, 0
+        away_pts, away_gp = 0, 0
+
+        team_pit: dict[str, dict] = {}
+
+        for g in sorted_games:
+            event_id = g["event_id"]
+
+            # ---- SAVE current running stats (BEFORE this game) ----
+            team_pit[event_id] = {
+                "record": f"{overall_w}-{overall_l}",
+                "home_record": f"{home_w}-{home_l}",
+                "neutral_record": f"{neutral_w}-{neutral_l}",
+                "away_record": f"{away_w}-{away_l}",
+                "ats_record": f"{ats_overall_w}-{ats_overall_l}-{ats_overall_p}",
+                "ats_home": f"{ats_home_w}-{ats_home_l}-{ats_home_p}",
+                "ats_neutral": f"{ats_neutral_w}-{ats_neutral_l}-{ats_neutral_p}",
+                "ats_away": f"{ats_away_w}-{ats_away_l}-{ats_away_p}",
+                "ppg": round(total_pts / total_gp, 1) if total_gp > 0 else "",
+                "home_ppg": round(home_pts / home_gp, 1) if home_gp > 0 else "",
+                "neutral_ppg": round(neutral_pts / neutral_gp, 1) if neutral_gp > 0 else "",
+                "away_ppg": round(away_pts / away_gp, 1) if away_gp > 0 else "",
+            }
+
+            # ---- UPDATE running stats with this game's results ----
+            w = g["win_loss"] == "W"
+            ha = g["home_away"]  # "home", "away", or "neutral"
+            score = g["team_score"]
+
+            overall_w += int(w)
+            overall_l += int(not w)
+            total_pts += score
+            total_gp += 1
+
+            if ha == "home":
+                home_w += int(w)
+                home_l += int(not w)
+                home_pts += score
+                home_gp += 1
+            elif ha == "neutral":
+                neutral_w += int(w)
+                neutral_l += int(not w)
+                neutral_pts += score
+                neutral_gp += 1
+            else:  # away
+                away_w += int(w)
+                away_l += int(not w)
+                away_pts += score
+                away_gp += 1
+
+            # ATS update (only when closing spread exists)
+            cs = closing_spreads.get(team_name, {}).get(event_id)
+            if cs is not None:
+                margin = g["team_score"] - g["opp_score"]
+                ats_val = margin + cs  # spread is from team perspective
+                if ats_val > 0:
+                    ats_overall_w += 1
+                    if ha == "home":
+                        ats_home_w += 1
+                    elif ha == "neutral":
+                        ats_neutral_w += 1
+                    else:
+                        ats_away_w += 1
+                elif ats_val < 0:
+                    ats_overall_l += 1
+                    if ha == "home":
+                        ats_home_l += 1
+                    elif ha == "neutral":
+                        ats_neutral_l += 1
+                    else:
+                        ats_away_l += 1
+                else:  # push
+                    ats_overall_p += 1
+                    if ha == "home":
+                        ats_home_p += 1
+                    elif ha == "neutral":
+                        ats_neutral_p += 1
+                    else:
+                        ats_away_p += 1
+
+        pit_stats[team_name] = team_pit
+
+    return pit_stats
+
+
+# ---------------------------------------------------------------------------
 # Step 5 -- Main orchestration
 # ---------------------------------------------------------------------------
 
@@ -763,6 +1043,16 @@ def main():
         cache["schedules"] = {}
 
     schedules: dict[str, list[dict]] = cache["schedules"]
+
+    # Check if schedules need re-fetch (missing neutral_site or opponent_id)
+    if schedules and any(
+        any("neutral_site" not in g or "opponent_id" not in g for g in games)
+        for games in schedules.values() if games
+    ):
+        print(f"[{_now_str()}] Schedules missing neutral_site/opponent_id, re-fetching ...")
+        schedules = {}
+        cache["schedules"] = schedules
+
     teams_to_fetch = [t for t in TEAMS if t in team_ids and t not in schedules]
 
     if teams_to_fetch:
@@ -934,17 +1224,31 @@ def main():
     save_cache(cache)
 
     # ------------------------------------------------------------------
-    # 5. Build final rows + write CSV
+    # 5. Compute PIT stats
+    # ------------------------------------------------------------------
+    print(f"\n[{_now_str()}] Computing Point-In-Time statistics ...")
+    pit_stats = compute_pit_stats(schedules, team_ids, odds_cache)
+
+    # Build reverse mapping for opponent lookups
+    espn_id_to_canonical = _build_espn_id_to_canonical(team_ids)
+
+    # ------------------------------------------------------------------
+    # 6. Build final rows + write CSV
     # ------------------------------------------------------------------
     print(f"\n[{_now_str()}] Building CSV rows ...")
 
     csv_headers = [
-        "Team", "Date", "Opponent", "Home_Away",
-        "Team_1H_Score", "Opp_1H_Score",
+        "Team", "Date", "Opponent", "Home_Away", "Conference_Game",
         "Team_Final_Score", "Opp_Final_Score",
         "W_L",
         "Opening_FG_ML", "Closing_FG_ML",
         "Opening_FG_Spread", "Closing_FG_Spread",
+        "Team_Record", "Team_Home_Record", "Team_Neutral_Record", "Team_Away_Record",
+        "Opp_Record", "Opp_Home_Record", "Opp_Neutral_Record", "Opp_Away_Record",
+        "Team_ATS", "Team_Home_ATS", "Team_Neutral_ATS", "Team_Away_ATS",
+        "Opp_ATS", "Opp_Home_ATS", "Opp_Neutral_ATS", "Opp_Away_ATS",
+        "Team_PPG", "Team_Home_PPG", "Team_Neutral_PPG", "Team_Away_PPG",
+        "Opp_PPG", "Opp_Home_PPG", "Opp_Neutral_PPG", "Opp_Away_PPG",
     ]
 
     rows: list[list] = []
@@ -1004,10 +1308,19 @@ def main():
 
     for team_name in TEAMS:
         games = schedules.get(team_name, [])
+        team_pit = pit_stats.get(team_name, {})
+
         for g in games:
             total_games += 1
             date_str = g.get("date", "")
             opp_name = g.get("opponent", "")
+            event_id = g.get("event_id", "")
+
+            # --- Conference game determination ---
+            opp_team_id = g.get("opponent_id", "")
+            conf_game = _is_conference_game(team_name, opp_team_id,
+                                            espn_id_to_canonical)
+            conf_flag = "Y" if conf_game else "N"
 
             # --- Odds --- Find true opening/closing per market
             odds_result = _find_opening_closing(date_str, team_name, opp_name)
@@ -1020,13 +1333,58 @@ def main():
             if any(v is not None for v in [open_fg_ml, close_fg_ml, open_fg_spread, close_fg_spread]):
                 odds_match_count += 1
 
+            # --- PIT stats for this team ---
+            t_pit = team_pit.get(event_id, {})
+            team_record = t_pit.get("record", "0-0")
+            team_home_record = t_pit.get("home_record", "0-0")
+            team_neutral_record = t_pit.get("neutral_record", "0-0")
+            team_away_record = t_pit.get("away_record", "0-0")
+            team_ats = t_pit.get("ats_record", "0-0-0")
+            team_ats_home = t_pit.get("ats_home", "0-0-0")
+            team_ats_neutral = t_pit.get("ats_neutral", "0-0-0")
+            team_ats_away = t_pit.get("ats_away", "0-0-0")
+            team_ppg = t_pit.get("ppg", "")
+            team_home_ppg = t_pit.get("home_ppg", "")
+            team_neutral_ppg = t_pit.get("neutral_ppg", "")
+            team_away_ppg = t_pit.get("away_ppg", "")
+
+            # --- PIT stats for opponent (if in our 76-team list) ---
+            opp_canonical = espn_id_to_canonical.get(opp_team_id)
+            if opp_canonical and opp_canonical in pit_stats:
+                o_pit = pit_stats[opp_canonical].get(event_id, {})
+                opp_record = o_pit.get("record", "0-0")
+                opp_home_record = o_pit.get("home_record", "0-0")
+                opp_neutral_record = o_pit.get("neutral_record", "0-0")
+                opp_away_record = o_pit.get("away_record", "0-0")
+                opp_ats = o_pit.get("ats_record", "0-0-0")
+                opp_ats_home = o_pit.get("ats_home", "0-0-0")
+                opp_ats_neutral = o_pit.get("ats_neutral", "0-0-0")
+                opp_ats_away = o_pit.get("ats_away", "0-0-0")
+                opp_ppg = o_pit.get("ppg", "")
+                opp_home_ppg = o_pit.get("home_ppg", "")
+                opp_neutral_ppg = o_pit.get("neutral_ppg", "")
+                opp_away_ppg = o_pit.get("away_ppg", "")
+            else:
+                # Opponent not in our 76-team list -- leave blank
+                opp_record = ""
+                opp_home_record = ""
+                opp_neutral_record = ""
+                opp_away_record = ""
+                opp_ats = ""
+                opp_ats_home = ""
+                opp_ats_neutral = ""
+                opp_ats_away = ""
+                opp_ppg = ""
+                opp_home_ppg = ""
+                opp_neutral_ppg = ""
+                opp_away_ppg = ""
+
             rows.append([
                 team_name,
                 date_str,
                 g.get("opponent", ""),
                 g.get("home_away", ""),
-                g.get("team_1h", ""),
-                g.get("opp_1h", ""),
+                conf_flag,
                 g.get("team_score", ""),
                 g.get("opp_score", ""),
                 g.get("win_loss", ""),
@@ -1034,6 +1392,30 @@ def main():
                 close_fg_ml if close_fg_ml is not None else "",
                 open_fg_spread if open_fg_spread is not None else "",
                 close_fg_spread if close_fg_spread is not None else "",
+                team_record,
+                team_home_record,
+                team_neutral_record,
+                team_away_record,
+                opp_record,
+                opp_home_record,
+                opp_neutral_record,
+                opp_away_record,
+                team_ats,
+                team_ats_home,
+                team_ats_neutral,
+                team_ats_away,
+                opp_ats,
+                opp_ats_home,
+                opp_ats_neutral,
+                opp_ats_away,
+                team_ppg,
+                team_home_ppg,
+                team_neutral_ppg,
+                team_away_ppg,
+                opp_ppg,
+                opp_home_ppg,
+                opp_neutral_ppg,
+                opp_away_ppg,
             ])
 
     # Sort by date, then team
