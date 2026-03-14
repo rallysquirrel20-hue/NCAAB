@@ -153,6 +153,29 @@ def build_features(df):
         lambda x: x.shift(1).rolling(5, min_periods=1).mean()
     )
 
+    # --- Conference-only stats ---
+    # Conference games are a much better indicator of true team strength
+    # since non-conference schedules include cupcake games that inflate stats.
+    conf_mask = df["Conference_Game"] == "Y"
+    df["_conf_score"] = df["Team_Final_Score"].where(conf_mask)
+    df["_conf_opp_score"] = df["Opp_Final_Score"].where(conf_mask)
+    df["_conf_margin"] = df["margin"].where(conf_mask)
+
+    df["conf_avg_score"] = df.groupby("Team")["_conf_score"].transform(
+        lambda x: x.shift(1).expanding().mean()
+    )
+    df["conf_avg_opp_score"] = df.groupby("Team")["_conf_opp_score"].transform(
+        lambda x: x.shift(1).expanding().mean()
+    )
+    df["conf_avg_margin"] = df.groupby("Team")["_conf_margin"].transform(
+        lambda x: x.shift(1).expanding().mean()
+    )
+    # Conference PPG differential
+    df["conf_ppg_diff"] = df["conf_avg_score"] - df["conf_avg_opp_score"]
+
+    # Clean up temp columns
+    df = df.drop(columns=["_conf_score", "_conf_opp_score", "_conf_margin"])
+
     # --- Defensive stats (how many points the team allows) ---
     # team_avg_opp_score already captures this for the team.
     # We also need it on a recent-form basis:
@@ -231,6 +254,8 @@ SCORE_FEATURES = [
     "team_def_ppg_allowed", "team_def_recent_allowed",
     "opp_def_ppg_allowed", "opp_def_recent_allowed",
     "off_vs_def", "opp_off_vs_def", "off_vs_def_recent",
+    # Conference-only stats
+    "conf_avg_score", "conf_avg_opp_score", "conf_avg_margin", "conf_ppg_diff",
 ]
 
 ATS_FEATURES = SCORE_FEATURES + [

@@ -136,6 +136,11 @@ def build_game_features(team_stats, opp_stats, game_info):
         "off_vs_def": team_stats.get("team_avg_score", 75) - opp_stats.get("team_def_ppg_allowed", 70),
         "opp_off_vs_def": opp_stats.get("team_avg_score", 75) - team_stats.get("team_def_ppg_allowed", 70),
         "off_vs_def_recent": team_stats.get("team_recent_score", 75) - opp_stats.get("team_def_recent_allowed", 70),
+        # Conference-only stats
+        "conf_avg_score": team_stats.get("conf_avg_score", 75),
+        "conf_avg_opp_score": team_stats.get("conf_avg_opp_score", 70),
+        "conf_avg_margin": team_stats.get("conf_avg_margin", 0),
+        "conf_ppg_diff": team_stats.get("conf_ppg_diff", 0),
         "spread_open": spread_open,
     }
     # Handle NaNs
