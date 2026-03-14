@@ -9,7 +9,10 @@ Point-In-Time (PIT) statistics, and outputs everything to CSV.
 Season: 2025-26 (ESPN season=2026)
 
 Usage:
-    python ncaab_data_builder.py
+    python ncaab_data_builder.py            # Full build (skips cached data)
+    python ncaab_data_builder.py --update   # Incremental update (re-fetches
+                                            # schedules to find new games,
+                                            # only fetches odds for new dates)
 """
 
 import csv
@@ -29,13 +32,14 @@ from dotenv import load_dotenv
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = SCRIPT_DIR.parent
 
-load_dotenv(PROJECT_DIR / ".env", override=True)
+# Load .env from the same directory as this script
+load_dotenv(SCRIPT_DIR / ".env", override=True)
 
 THE_ODDS_API_KEY = os.getenv("THE_ODDS_API_KEY")
-if not THE_ODDS_API_KEY:
-    sys.exit("ERROR: THE_ODDS_API_KEY not found in .env file")
+if not THE_ODDS_API_KEY or THE_ODDS_API_KEY == "PASTE_YOUR_KEY_HERE":
+    THE_ODDS_API_KEY = None
+    print("WARNING: THE_ODDS_API_KEY not set in .env -- odds fetching will be skipped")
 
 SEASON = 2026  # ESPN uses the ending year for the season label
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball"
@@ -1013,9 +1017,25 @@ def compute_pit_stats(
 # Step 5 -- Main orchestration
 # ---------------------------------------------------------------------------
 
+def _merge_schedules(existing: list[dict], fresh: list[dict]) -> tuple[list[dict], int]:
+    """Merge freshly fetched games into existing cached games.
+
+    Returns (merged_list, count_of_new_games).
+    Existing games are kept as-is (preserving cached half scores etc.).
+    Only truly new event_ids are appended.
+    """
+    existing_ids = {g["event_id"] for g in existing}
+    new_games = [g for g in fresh if g["event_id"] not in existing_ids]
+    return existing + new_games, len(new_games)
+
+
 def main():
+    # Parse CLI flags
+    update_mode = "--update" in sys.argv
+
+    mode_label = "INCREMENTAL UPDATE" if update_mode else "FULL BUILD"
     print("=" * 70)
-    print("  NCAAB Data Builder  --  Season 2025-26")
+    print(f"  NCAAB Data Builder  --  Season 2025-26  [{mode_label}]")
     print("=" * 70)
     print()
 
@@ -1045,7 +1065,7 @@ def main():
     schedules: dict[str, list[dict]] = cache["schedules"]
 
     # Check if schedules need re-fetch (missing neutral_site or opponent_id)
-    if schedules and any(
+    if not update_mode and schedules and any(
         any("neutral_site" not in g or "opponent_id" not in g for g in games)
         for games in schedules.values() if games
     ):
@@ -1053,24 +1073,47 @@ def main():
         schedules = {}
         cache["schedules"] = schedules
 
-    teams_to_fetch = [t for t in TEAMS if t in team_ids and t not in schedules]
+    if update_mode:
+        # --- INCREMENTAL MODE ---
+        # Re-fetch ALL schedules from ESPN (free API) and merge new games
+        teams_with_ids = [t for t in TEAMS if t in team_ids]
+        print(f"\n[{_now_str()}] Incremental update: re-fetching schedules for {len(teams_with_ids)} teams ...")
+        total_new = 0
+        for i, team_name in enumerate(teams_with_ids, 1):
+            tid = team_ids[team_name]
+            fresh_games = fetch_schedule(tid, team_name)
+            existing_games = schedules.get(team_name, [])
+            merged, new_count = _merge_schedules(existing_games, fresh_games)
+            schedules[team_name] = merged
+            if new_count > 0:
+                print(f"  [{_now_str()}] ({i}/{len(teams_with_ids)}) {team_name}: +{new_count} new games")
+                total_new += new_count
 
-    if teams_to_fetch:
-        print(f"\n[{_now_str()}] Fetching schedules for {len(teams_to_fetch)} teams ...")
+            if i % 10 == 0:
+                cache["schedules"] = schedules
+                save_cache(cache)
+
+        print(f"  [{_now_str()}] Update complete: {total_new} new games found across all teams")
     else:
-        print(f"\n[{_now_str()}] All {len(schedules)} team schedules already cached.")
+        # --- FULL BUILD MODE (original behavior) ---
+        teams_to_fetch = [t for t in TEAMS if t in team_ids and t not in schedules]
 
-    for i, team_name in enumerate(teams_to_fetch, 1):
-        tid = team_ids[team_name]
-        print(f"  [{_now_str()}] ({i}/{len(teams_to_fetch)}) {team_name} (ESPN id={tid}) ...")
-        games = fetch_schedule(tid, team_name)
-        schedules[team_name] = games
-        print(f"    -> {len(games)} completed games")
+        if teams_to_fetch:
+            print(f"\n[{_now_str()}] Fetching schedules for {len(teams_to_fetch)} teams ...")
+        else:
+            print(f"\n[{_now_str()}] All {len(schedules)} team schedules already cached.")
 
-        # Save every 5 teams
-        if i % 5 == 0:
-            cache["schedules"] = schedules
-            save_cache(cache)
+        for i, team_name in enumerate(teams_to_fetch, 1):
+            tid = team_ids[team_name]
+            print(f"  [{_now_str()}] ({i}/{len(teams_to_fetch)}) {team_name} (ESPN id={tid}) ...")
+            games = fetch_schedule(tid, team_name)
+            schedules[team_name] = games
+            print(f"    -> {len(games)} completed games")
+
+            # Save every 5 teams
+            if i % 5 == 0:
+                cache["schedules"] = schedules
+                save_cache(cache)
 
     cache["schedules"] = schedules
     save_cache(cache)
@@ -1177,6 +1220,10 @@ def main():
     #          approximates a late-afternoon closing line)
 
     dates_needing_odds = [d for d in game_dates_sorted if d not in odds_cache]
+
+    if not THE_ODDS_API_KEY and dates_needing_odds:
+        print(f"\n[{_now_str()}] Skipping odds fetch for {len(dates_needing_odds)} dates (no API key)")
+        dates_needing_odds = []
 
     if dates_needing_odds:
         print(f"\n[{_now_str()}] Fetching odds for {len(dates_needing_odds)} dates ...")
