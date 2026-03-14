@@ -389,8 +389,32 @@ SCORE_FEATURES = [
     "blend_off_vs_def", "blend_opp_off_vs_def", "blend_ppg_diff", "blend_margin_diff",
 ]
 
-ATS_FEATURES = SCORE_FEATURES + [
-    "spread_open",
+ATS_FEATURES = [
+    # --- Score model's view: predicted margin vs spread (most important signal) ---
+    "pred_margin_vs_spread",
+    # --- Market ---
+    "spread", "spread_open", "spread_move", "ml_implied_prob",
+    # --- Venue ---
+    "is_home", "is_away", "is_neutral", "is_conf",
+    # --- ATS Records (heavily weighted — overall, conf, home, away) ---
+    "ats_pct", "ats_pct_conf", "ats_pct_home", "ats_pct_away",
+    "opp_ats_pct", "opp_ats_pct_conf", "opp_ats_pct_home", "opp_ats_pct_away",
+    # --- ATS Form (recent cover trends) ---
+    "form5_ats", "form5_ats_conf", "form3_ats",
+    "opp_form5_ats", "opp_form5_ats_conf", "opp_form3_ats",
+    # --- Conference-weighted blends (same inputs driving score model) ---
+    "blend_off", "blend_def", "blend_margin", "blend_ats", "blend_win",
+    "opp_blend_off", "opp_blend_def", "opp_blend_margin", "opp_blend_ats",
+    "blend_off_vs_def", "blend_opp_off_vs_def", "blend_ppg_diff", "blend_margin_diff",
+    # --- Matchup interactions ---
+    "off_vs_def", "off_vs_def_conf", "opp_off_vs_def", "opp_off_vs_def_conf",
+    "ppg_diff", "ppg_diff_conf",
+    # --- Win % (overall, conf) ---
+    "win_pct", "win_pct_conf", "opp_win_pct", "opp_win_pct_conf",
+    # --- Margin (overall, conf) ---
+    "avg_margin", "avg_margin_conf", "opp_avg_margin", "opp_avg_margin_conf",
+    # --- Recent form (scoring) ---
+    "form5_margin", "form3_margin", "opp_form5_margin", "opp_form3_margin",
 ]
 
 
@@ -492,6 +516,18 @@ def train_and_evaluate(df):
     print("\n" + "=" * 70)
     print("MODEL 2: ATS (AGAINST THE SPREAD) PREDICTION")
     print("=" * 70)
+
+    # Compute pred_margin_vs_spread for ALL data using score models
+    # For train: use in-sample predictions (the ATS model learns the signal)
+    # For test: use out-of-sample predictions (fair evaluation)
+    all_X_s = scaler_s.transform(model_df[SCORE_FEATURES].values)
+    all_pred_team = model_team.predict(all_X_s)
+    all_pred_opp = model_opp.predict(all_X_s)
+    model_df["pred_margin_vs_spread"] = (all_pred_team - all_pred_opp) - model_df["spread"].values
+
+    # Re-split after adding the new column
+    train = model_df.iloc[:split_idx]
+    test = model_df.iloc[split_idx:]
 
     # Remove pushes for cleaner classification
     train_ats = train[train["ats_push"] == 0].copy()
@@ -625,30 +661,50 @@ def train_and_evaluate(df):
     print("TIME-SERIES CROSS-VALIDATION (5 folds)")
     print("=" * 70)
 
-    all_X = model_df[SCORE_FEATURES].values
+    all_X_score = model_df[SCORE_FEATURES].values
     all_y_team = model_df["Team_Final_Score"].values
+    all_y_opp = model_df["Opp_Final_Score"].values
     all_y_cov = model_df["covered"].values
+    all_spreads = model_df["spread"].values
 
     tscv = TimeSeriesSplit(n_splits=5)
     cv_mae = []
     cv_ats_acc = []
-    for fold, (tr_idx, te_idx) in enumerate(tscv.split(all_X)):
+    for fold, (tr_idx, te_idx) in enumerate(tscv.split(all_X_score)):
         sc = StandardScaler()
-        Xtr = sc.fit_transform(all_X[tr_idx])
-        Xte = sc.transform(all_X[te_idx])
+        Xtr = sc.fit_transform(all_X_score[tr_idx])
+        Xte = sc.transform(all_X_score[te_idx])
 
-        m = GradientBoostingRegressor(n_estimators=200, max_depth=4,
-                                       learning_rate=0.05, subsample=0.8,
-                                       random_state=42)
-        m.fit(Xtr, all_y_team[tr_idx])
-        p = m.predict(Xte)
-        cv_mae.append(mean_absolute_error(all_y_team[te_idx], p))
+        # Score model for this fold
+        m_team = GradientBoostingRegressor(n_estimators=200, max_depth=4,
+                                           learning_rate=0.05, subsample=0.8,
+                                           random_state=42)
+        m_team.fit(Xtr, all_y_team[tr_idx])
+        p_team = m_team.predict(Xte)
+        cv_mae.append(mean_absolute_error(all_y_team[te_idx], p_team))
+
+        m_opp = GradientBoostingRegressor(n_estimators=200, max_depth=4,
+                                           learning_rate=0.05, subsample=0.8,
+                                           random_state=42)
+        m_opp.fit(Xtr, all_y_opp[tr_idx])
+        p_opp = m_opp.predict(Xte)
+
+        # Compute pred_margin_vs_spread for this fold
+        cv_df = model_df.copy()
+        all_p_team = m_team.predict(sc.transform(all_X_score))
+        all_p_opp = m_opp.predict(sc.transform(all_X_score))
+        cv_df["pred_margin_vs_spread"] = (all_p_team - all_p_opp) - all_spreads
+
+        cv_X_ats = cv_df[ATS_FEATURES].values
+        sc_a = StandardScaler()
+        Xtr_a = sc_a.fit_transform(cv_X_ats[tr_idx])
+        Xte_a = sc_a.transform(cv_X_ats[te_idx])
 
         mc = GradientBoostingClassifier(n_estimators=200, max_depth=3,
                                          learning_rate=0.05, subsample=0.8,
                                          random_state=42)
-        mc.fit(Xtr, all_y_cov[tr_idx])
-        pc = mc.predict(Xte)
+        mc.fit(Xtr_a, all_y_cov[tr_idx])
+        pc = mc.predict(Xte_a)
         cv_ats_acc.append(accuracy_score(all_y_cov[te_idx], pc))
 
         print(f"  Fold {fold+1}: Score MAE = {cv_mae[-1]:.2f}, ATS Acc = {cv_ats_acc[-1]:.1%}")

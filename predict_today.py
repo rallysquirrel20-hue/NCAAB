@@ -43,6 +43,11 @@ model_opp = GradientBoostingRegressor(
 )
 model_opp.fit(X_s, train_df["Opp_Final_Score"].values)
 
+# Compute pred_margin_vs_spread for training ATS model
+all_pred_team = model_team.predict(X_s)
+all_pred_opp = model_opp.predict(X_s)
+train_df["pred_margin_vs_spread"] = (all_pred_team - all_pred_opp) - train_df["spread"].values
+
 scaler_a = StandardScaler()
 train_ats = train_df[train_df["ats_push"] == 0]
 X_a = scaler_a.fit_transform(train_ats[ATS_FEATURES].values)
@@ -238,14 +243,24 @@ for i in range(0, len(todays_games), 2):
     fav_feat = build_game_features(fav_stats, dog_stats, fav_info)
     dog_feat = build_game_features(dog_stats, fav_stats, dog_info)
 
-    # Predict from favorite's perspective
+    # Predict scores from favorite's perspective
     X_fav_s = scaler_s.transform([[fav_feat[f] for f in SCORE_FEATURES]])
-    X_fav_a = scaler_a.transform([[fav_feat[f] for f in ATS_FEATURES]])
     fav_pred_team = model_team.predict(X_fav_s)[0]
     fav_pred_opp = model_opp.predict(X_fav_s)[0]
+
+    # Predict scores from underdog's perspective
+    X_dog_s = scaler_s.transform([[dog_feat[f] for f in SCORE_FEATURES]])
+    dog_pred_team = model_team.predict(X_dog_s)[0]
+    dog_pred_opp = model_opp.predict(X_dog_s)[0]
+
+    # Add pred_margin_vs_spread for ATS model (score model's view of the spread)
+    fav_feat["pred_margin_vs_spread"] = (fav_pred_team - fav_pred_opp) - fav_info[4]
+    dog_feat["pred_margin_vs_spread"] = (dog_pred_team - dog_pred_opp) - dog_info[4]
+
+    # ATS predictions
+    X_fav_a = scaler_a.transform([[fav_feat[f] for f in ATS_FEATURES]])
     fav_ats_prob = ats_model.predict_proba(X_fav_a)[0][1]
 
-    # Predict from underdog's perspective
     X_dog_a = scaler_a.transform([[dog_feat[f] for f in ATS_FEATURES]])
     dog_ats_prob = ats_model.predict_proba(X_dog_a)[0][1]
 
