@@ -141,6 +141,8 @@ def build_game_features(team_stats, opp_stats, game_info):
         "conf_avg_opp_score": team_stats.get("conf_avg_opp_score", 70),
         "conf_avg_margin": team_stats.get("conf_avg_margin", 0),
         "conf_ppg_diff": team_stats.get("conf_ppg_diff", 0),
+        "conf_ats_cover_pct": team_stats.get("conf_ats_cover_pct", 0.5),
+        "conf_ats_recent": team_stats.get("conf_ats_recent", 0.5),
         "spread_open": spread_open,
     }
     # Handle NaNs

@@ -161,6 +161,21 @@ def build_features(df):
     df["_conf_opp_score"] = df["Opp_Final_Score"].where(conf_mask)
     df["_conf_margin"] = df["margin"].where(conf_mask)
 
+    # Conference ATS: did the team cover the spread in conference games?
+    _ats_margin = df["Team_Final_Score"] + df["spread"] - df["Opp_Final_Score"]
+    _covered = (_ats_margin > 0).astype(float)
+    df["_covered_conf"] = _covered.where(conf_mask & df["spread"].notna())
+
+    # Conference ATS cover rate (expanding, point-in-time)
+    df["conf_ats_cover_pct"] = df.groupby("Team")["_covered_conf"].transform(
+        lambda x: x.shift(1).expanding().mean()
+    )
+    # Conference ATS last 5 conference games
+    df["conf_ats_recent"] = df.groupby("Team")["_covered_conf"].transform(
+        lambda x: x.shift(1).rolling(5, min_periods=1).mean()
+    )
+    df = df.drop(columns=["_covered_conf"])
+
     df["conf_avg_score"] = df.groupby("Team")["_conf_score"].transform(
         lambda x: x.shift(1).expanding().mean()
     )
@@ -256,6 +271,7 @@ SCORE_FEATURES = [
     "off_vs_def", "opp_off_vs_def", "off_vs_def_recent",
     # Conference-only stats
     "conf_avg_score", "conf_avg_opp_score", "conf_avg_margin", "conf_ppg_diff",
+    "conf_ats_cover_pct", "conf_ats_recent",
 ]
 
 ATS_FEATURES = SCORE_FEATURES + [
