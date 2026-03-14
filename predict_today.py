@@ -16,8 +16,8 @@ df = build_features(df)
 # Filter to usable rows for training
 mask = (
     df["spread"].notna()
-    & df["Team_PPG"].notna()
-    & df["team_avg_margin"].notna()
+    & df["off_ppg"].notna()
+    & df["avg_margin"].notna()
     & (df["Team_Record_games"] >= 3)
 )
 train_df = df[mask].copy().sort_values("Date").reset_index(drop=True)
@@ -93,58 +93,125 @@ def ml_to_prob(ml_val):
 
 
 def build_game_features(team_stats, opp_stats, game_info):
-    """Build feature dict for one side of a game."""
+    """Build feature dict for one side of a game.
+
+    Pulls team stats from team_stats row, opponent stats from opp_stats row.
+    For 'opp_*' features, we look up the corresponding team-side stat from opp_stats.
+    """
     spread = game_info[4]
     spread_open = game_info[5]
     ml = game_info[6]
+
+    def _get(row, col, default=0):
+        v = row.get(col, default)
+        return default if pd.isna(v) else v
+
     feat = {
+        # --- Venue ---
         "is_home": 0,
         "is_away": 0,
         "is_neutral": 1,
         "is_conf": 0,
+        # --- Market ---
         "spread": spread,
         "spread_move": spread - spread_open,
         "ml_implied_prob": ml_to_prob(ml),
-        "Team_Record_pct": team_stats.get("Team_Record_pct", 0.5),
-        "Team_Home_Record_pct": team_stats.get("Team_Home_Record_pct", 0.5),
-        "Team_Away_Record_pct": team_stats.get("Team_Away_Record_pct", 0.5),
-        "Team_Record_games": team_stats.get("Team_Record_games", 20),
-        "Opp_Record_pct": opp_stats.get("Team_Record_pct", 0.5),
-        "Opp_Home_Record_pct": opp_stats.get("Team_Home_Record_pct", 0.5),
-        "Opp_Away_Record_pct": opp_stats.get("Team_Away_Record_pct", 0.5),
-        "Team_PPG": team_stats.get("Team_PPG", 75),
-        "Team_Home_PPG": team_stats.get("Team_Home_PPG", 75),
-        "Team_Away_PPG": team_stats.get("Team_Away_PPG", 75),
-        "Opp_PPG": opp_stats.get("Team_PPG", 70),
-        "Opp_Home_PPG": opp_stats.get("Team_Home_PPG", 70),
-        "Opp_Away_PPG": opp_stats.get("Team_Away_PPG", 70),
-        "ppg_diff": team_stats.get("Team_PPG", 75) - opp_stats.get("Team_PPG", 70),
-        "team_avg_margin": team_stats.get("team_avg_margin", 0),
-        "team_avg_score": team_stats.get("team_avg_score", 75),
-        "team_avg_opp_score": team_stats.get("team_avg_opp_score", 70),
-        "team_recent_margin": team_stats.get("team_recent_margin", 0),
-        "team_recent_score": team_stats.get("team_recent_score", 75),
-        "Team_ATS_cover_pct": team_stats.get("Team_ATS_cover_pct", 0.5),
-        "Team_Home_ATS_cover_pct": team_stats.get("Team_Home_ATS_cover_pct", 0.5),
-        "Team_Away_ATS_cover_pct": team_stats.get("Team_Away_ATS_cover_pct", 0.5),
-        "Opp_ATS_cover_pct": opp_stats.get("Team_ATS_cover_pct", 0.5),
-        # Defensive & matchup features
-        "team_def_ppg_allowed": team_stats.get("team_def_ppg_allowed", 70),
-        "team_def_recent_allowed": team_stats.get("team_def_recent_allowed", 70),
-        "opp_def_ppg_allowed": opp_stats.get("team_def_ppg_allowed", 70),
-        "opp_def_recent_allowed": opp_stats.get("team_def_recent_allowed", 70),
-        "off_vs_def": team_stats.get("team_avg_score", 75) - opp_stats.get("team_def_ppg_allowed", 70),
-        "opp_off_vs_def": opp_stats.get("team_avg_score", 75) - team_stats.get("team_def_ppg_allowed", 70),
-        "off_vs_def_recent": team_stats.get("team_recent_score", 75) - opp_stats.get("team_def_recent_allowed", 70),
-        # Conference-only stats
-        "conf_avg_score": team_stats.get("conf_avg_score", 75),
-        "conf_avg_opp_score": team_stats.get("conf_avg_opp_score", 70),
-        "conf_avg_margin": team_stats.get("conf_avg_margin", 0),
-        "conf_ppg_diff": team_stats.get("conf_ppg_diff", 0),
-        "conf_ats_cover_pct": team_stats.get("conf_ats_cover_pct", 0.5),
-        "conf_ats_recent": team_stats.get("conf_ats_recent", 0.5),
         "spread_open": spread_open,
+        # --- Team Offense ---
+        "off_ppg": _get(team_stats, "off_ppg", 75),
+        "off_ppg_conf": _get(team_stats, "off_ppg_conf", 75),
+        "off_ppg_home": _get(team_stats, "off_ppg_home", 75),
+        "off_ppg_away": _get(team_stats, "off_ppg_away", 75),
+        # --- Team Defense ---
+        "def_ppg": _get(team_stats, "def_ppg", 70),
+        "def_ppg_conf": _get(team_stats, "def_ppg_conf", 70),
+        "def_ppg_home": _get(team_stats, "def_ppg_home", 70),
+        "def_ppg_away": _get(team_stats, "def_ppg_away", 70),
+        # --- Win % ---
+        "win_pct": _get(team_stats, "win_pct", 0.5),
+        "win_pct_conf": _get(team_stats, "win_pct_conf", 0.5),
+        "win_pct_home": _get(team_stats, "win_pct_home", 0.5),
+        "win_pct_away": _get(team_stats, "win_pct_away", 0.5),
+        # --- ATS % ---
+        "ats_pct": _get(team_stats, "ats_pct", 0.5),
+        "ats_pct_conf": _get(team_stats, "ats_pct_conf", 0.5),
+        "ats_pct_home": _get(team_stats, "ats_pct_home", 0.5),
+        "ats_pct_away": _get(team_stats, "ats_pct_away", 0.5),
+        # --- Margin ---
+        "avg_margin": _get(team_stats, "avg_margin", 0),
+        "avg_margin_conf": _get(team_stats, "avg_margin_conf", 0),
+        # --- Form rolling 5 ---
+        "form5_off": _get(team_stats, "form5_off", 75),
+        "form5_def": _get(team_stats, "form5_def", 70),
+        "form5_margin": _get(team_stats, "form5_margin", 0),
+        "form5_ats": _get(team_stats, "form5_ats", 0.5),
+        "form5_win": _get(team_stats, "form5_win", 0.5),
+        "form5_off_conf": _get(team_stats, "form5_off_conf", 75),
+        "form5_def_conf": _get(team_stats, "form5_def_conf", 70),
+        "form5_ats_conf": _get(team_stats, "form5_ats_conf", 0.5),
+        # --- Form rolling 3 ---
+        "form3_off": _get(team_stats, "form3_off", 75),
+        "form3_def": _get(team_stats, "form3_def", 70),
+        "form3_margin": _get(team_stats, "form3_margin", 0),
+        "form3_ats": _get(team_stats, "form3_ats", 0.5),
+        "form3_win": _get(team_stats, "form3_win", 0.5),
+        # --- Opponent stats (from opp_stats row's team-side columns) ---
+        "opp_off_ppg": _get(opp_stats, "off_ppg", 75),
+        "opp_off_ppg_conf": _get(opp_stats, "off_ppg_conf", 75),
+        "opp_off_ppg_home": _get(opp_stats, "off_ppg_home", 75),
+        "opp_off_ppg_away": _get(opp_stats, "off_ppg_away", 75),
+        "opp_def_ppg": _get(opp_stats, "def_ppg", 70),
+        "opp_def_ppg_conf": _get(opp_stats, "def_ppg_conf", 70),
+        "opp_def_ppg_home": _get(opp_stats, "def_ppg_home", 70),
+        "opp_def_ppg_away": _get(opp_stats, "def_ppg_away", 70),
+        "opp_win_pct": _get(opp_stats, "win_pct", 0.5),
+        "opp_win_pct_conf": _get(opp_stats, "win_pct_conf", 0.5),
+        "opp_win_pct_home": _get(opp_stats, "win_pct_home", 0.5),
+        "opp_win_pct_away": _get(opp_stats, "win_pct_away", 0.5),
+        "opp_ats_pct": _get(opp_stats, "ats_pct", 0.5),
+        "opp_ats_pct_conf": _get(opp_stats, "ats_pct_conf", 0.5),
+        "opp_ats_pct_home": _get(opp_stats, "ats_pct_home", 0.5),
+        "opp_ats_pct_away": _get(opp_stats, "ats_pct_away", 0.5),
+        "opp_avg_margin": _get(opp_stats, "avg_margin", 0),
+        "opp_avg_margin_conf": _get(opp_stats, "avg_margin_conf", 0),
+        "opp_form5_off": _get(opp_stats, "form5_off", 75),
+        "opp_form5_def": _get(opp_stats, "form5_def", 70),
+        "opp_form5_margin": _get(opp_stats, "form5_margin", 0),
+        "opp_form5_ats": _get(opp_stats, "form5_ats", 0.5),
+        "opp_form3_off": _get(opp_stats, "form3_off", 75),
+        "opp_form3_def": _get(opp_stats, "form3_def", 70),
+        "opp_form3_margin": _get(opp_stats, "form3_margin", 0),
+        "opp_form3_ats": _get(opp_stats, "form3_ats", 0.5),
+        "opp_form5_off_conf": _get(opp_stats, "form5_off_conf", 75),
+        "opp_form5_def_conf": _get(opp_stats, "form5_def_conf", 70),
+        "opp_form5_ats_conf": _get(opp_stats, "form5_ats_conf", 0.5),
     }
+
+    # --- Matchup interactions (computed from the above) ---
+    feat["off_vs_def"] = feat["off_ppg"] - feat["opp_def_ppg"]
+    feat["off_vs_def_conf"] = feat["off_ppg_conf"] - feat["opp_def_ppg_conf"]
+    feat["off_vs_def_form5"] = feat["form5_off"] - feat["opp_form5_def"]
+    feat["off_vs_def_form3"] = feat["form3_off"] - feat["opp_form3_def"]
+    feat["opp_off_vs_def"] = feat["opp_off_ppg"] - feat["def_ppg"]
+    feat["opp_off_vs_def_conf"] = feat["opp_off_ppg_conf"] - feat["def_ppg_conf"]
+    feat["ppg_diff"] = feat["off_ppg"] - feat["opp_off_ppg"]
+    feat["ppg_diff_conf"] = feat["off_ppg_conf"] - feat["opp_off_ppg_conf"]
+
+    # --- Conference-weighted blends ---
+    CW = 0.7
+    feat["blend_off"] = feat["off_ppg_conf"] * CW + feat["off_ppg"] * (1 - CW)
+    feat["blend_def"] = feat["def_ppg_conf"] * CW + feat["def_ppg"] * (1 - CW)
+    feat["blend_margin"] = feat["avg_margin_conf"] * CW + feat["avg_margin"] * (1 - CW)
+    feat["blend_ats"] = feat["ats_pct_conf"] * CW + feat["ats_pct"] * (1 - CW)
+    feat["blend_win"] = feat["win_pct_conf"] * CW + feat["win_pct"] * (1 - CW)
+    feat["opp_blend_off"] = feat["opp_off_ppg_conf"] * CW + feat["opp_off_ppg"] * (1 - CW)
+    feat["opp_blend_def"] = feat["opp_def_ppg_conf"] * CW + feat["opp_def_ppg"] * (1 - CW)
+    feat["opp_blend_margin"] = feat["opp_avg_margin_conf"] * CW + feat["opp_avg_margin"] * (1 - CW)
+    feat["opp_blend_ats"] = feat["opp_ats_pct_conf"] * CW + feat["opp_ats_pct"] * (1 - CW)
+    feat["blend_off_vs_def"] = feat["blend_off"] - feat["opp_blend_def"]
+    feat["blend_opp_off_vs_def"] = feat["opp_blend_off"] - feat["blend_def"]
+    feat["blend_ppg_diff"] = feat["blend_off"] - feat["opp_blend_off"]
+    feat["blend_margin_diff"] = feat["blend_margin"] - feat["opp_blend_margin"]
     # Handle NaNs
     for k, v in feat.items():
         if pd.isna(v):

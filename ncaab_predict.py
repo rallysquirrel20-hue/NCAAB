@@ -74,13 +74,39 @@ def parse_ats(ats_str):
 # Feature engineering
 # ---------------------------------------------------------------------------
 
+def _pit_expanding(group_series):
+    """Point-in-time expanding mean (excludes current game)."""
+    return group_series.shift(1).expanding().mean()
+
+
+def _pit_roll(group_series, window):
+    """Point-in-time rolling mean over last `window` non-NaN values."""
+    return group_series.shift(1).rolling(window, min_periods=1).mean()
+
+
 def build_features(df):
-    """Build numeric features from the raw game log DataFrame."""
+    """Build numeric features from the raw game log DataFrame.
+
+    All stats are point-in-time: only use data available BEFORE each game.
+    Features are organized into systematic categories:
+      - Venue (home/away/neutral)
+      - Offense (overall, conference, home/away splits, form)
+      - Defense (overall, conference, home/away splits, form)
+      - Win % (overall, conference, home/away)
+      - ATS % (overall, conference, home/away)
+      - Form (rolling 3 and 5 game windows)
+      - Market (spread, moneyline)
+      - Matchup (offense vs defense interactions)
+    """
     df = df.copy()
 
     # Sort chronologically per team
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.sort_values(["Team", "Date"]).reset_index(drop=True)
+
+    # =====================================================================
+    # PARSE RAW COLUMNS
+    # =====================================================================
 
     # --- Parse record columns ---
     for prefix in ["Team", "Opp"]:
@@ -99,19 +125,27 @@ def build_features(df):
             parsed = df[col].apply(parse_ats)
             df[f"{col}_cover_pct"] = parsed.apply(lambda x: x[4])
 
-    # --- Encode categoricals ---
+    # --- PPG features (from CSV — point-in-time cumulative averages) ---
+    for col in ["Team_PPG", "Team_Home_PPG", "Team_Away_PPG",
+                "Opp_PPG", "Opp_Home_PPG", "Opp_Away_PPG"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # =====================================================================
+    # 1. VENUE
+    # =====================================================================
     df["is_home"] = (df["Home_Away"] == "home").astype(int)
     df["is_away"] = (df["Home_Away"] == "away").astype(int)
     df["is_neutral"] = (df["Home_Away"] == "neutral").astype(int)
     df["is_conf"] = (df["Conference_Game"] == "Y").astype(int)
 
-    # --- Spread / ML features ---
+    # =====================================================================
+    # 2. MARKET (spread, moneyline)
+    # =====================================================================
     df["spread"] = pd.to_numeric(df["Closing_FG_Spread"], errors="coerce")
     df["spread_open"] = pd.to_numeric(df["Opening_FG_Spread"], errors="coerce")
     df["spread_move"] = df["spread"] - df["spread_open"]
     df["ml"] = pd.to_numeric(df["Closing_FG_ML"], errors="coerce")
 
-    # Convert ML to implied probability
     def ml_to_prob(ml_val):
         if pd.isna(ml_val):
             return np.nan
@@ -122,94 +156,121 @@ def build_features(df):
 
     df["ml_implied_prob"] = df["ml"].apply(ml_to_prob)
 
-    # --- PPG features (these are point-in-time cumulative averages) ---
-    for col in ["Team_PPG", "Team_Home_PPG", "Team_Away_PPG",
-                "Opp_PPG", "Opp_Home_PPG", "Opp_Away_PPG"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # PPG differential
-    df["ppg_diff"] = df["Team_PPG"] - df["Opp_PPG"]
-
-    # --- Score margin history (computed per team) ---
+    # =====================================================================
+    # 3. CORE STATS — base columns for splits
+    # =====================================================================
     df["margin"] = df["Team_Final_Score"] - df["Opp_Final_Score"]
-    df["team_avg_margin"] = df.groupby("Team")["margin"].transform(
-        lambda x: x.shift(1).expanding().mean()
-    )
-    df["team_avg_score"] = df.groupby("Team")["Team_Final_Score"].transform(
-        lambda x: x.shift(1).expanding().mean()
-    )
-    df["team_avg_opp_score"] = df.groupby("Team")["Opp_Final_Score"].transform(
-        lambda x: x.shift(1).expanding().mean()
-    )
-
-    # Recent form: last 5 games rolling average margin
-    df["team_recent_margin"] = df.groupby("Team")["margin"].transform(
-        lambda x: x.shift(1).rolling(5, min_periods=1).mean()
-    )
-    df["team_recent_score"] = df.groupby("Team")["Team_Final_Score"].transform(
-        lambda x: x.shift(1).rolling(5, min_periods=1).mean()
-    )
-    df["team_recent_opp_score"] = df.groupby("Team")["Opp_Final_Score"].transform(
-        lambda x: x.shift(1).rolling(5, min_periods=1).mean()
-    )
-
-    # --- Conference-only stats ---
-    # Conference games are a much better indicator of true team strength
-    # since non-conference schedules include cupcake games that inflate stats.
     conf_mask = df["Conference_Game"] == "Y"
-    df["_conf_score"] = df["Team_Final_Score"].where(conf_mask)
-    df["_conf_opp_score"] = df["Opp_Final_Score"].where(conf_mask)
-    df["_conf_margin"] = df["margin"].where(conf_mask)
+    home_mask = df["Home_Away"] == "home"
+    away_mask = df["Home_Away"] == "away"
 
-    # Conference ATS: did the team cover the spread in conference games?
+    # ATS covered flag (for computing ATS splits)
     _ats_margin = df["Team_Final_Score"] + df["spread"] - df["Opp_Final_Score"]
-    _covered = (_ats_margin > 0).astype(float)
-    df["_covered_conf"] = _covered.where(conf_mask & df["spread"].notna())
+    df["_covered"] = (_ats_margin > 0).astype(float)
+    df.loc[df["spread"].isna(), "_covered"] = np.nan
 
-    # Conference ATS cover rate (expanding, point-in-time)
-    df["conf_ats_cover_pct"] = df.groupby("Team")["_covered_conf"].transform(
-        lambda x: x.shift(1).expanding().mean()
-    )
-    # Conference ATS last 5 conference games
-    df["conf_ats_recent"] = df.groupby("Team")["_covered_conf"].transform(
-        lambda x: x.shift(1).rolling(5, min_periods=1).mean()
-    )
-    df = df.drop(columns=["_covered_conf"])
+    # Win flag
+    df["_won"] = (df["margin"] > 0).astype(float)
 
-    df["conf_avg_score"] = df.groupby("Team")["_conf_score"].transform(
-        lambda x: x.shift(1).expanding().mean()
-    )
-    df["conf_avg_opp_score"] = df.groupby("Team")["_conf_opp_score"].transform(
-        lambda x: x.shift(1).expanding().mean()
-    )
-    df["conf_avg_margin"] = df.groupby("Team")["_conf_margin"].transform(
-        lambda x: x.shift(1).expanding().mean()
-    )
-    # Conference PPG differential
-    df["conf_ppg_diff"] = df["conf_avg_score"] - df["conf_avg_opp_score"]
+    # =====================================================================
+    # 4. OFFENSE — PPG (overall, conference, home, away)
+    # =====================================================================
+    # Overall (season-long)
+    df["off_ppg"] = df.groupby("Team")["Team_Final_Score"].transform(_pit_expanding)
+    # Conference only
+    df["_conf_pts"] = df["Team_Final_Score"].where(conf_mask)
+    df["off_ppg_conf"] = df.groupby("Team")["_conf_pts"].transform(_pit_expanding)
+    # Home only
+    df["_home_pts"] = df["Team_Final_Score"].where(home_mask)
+    df["off_ppg_home"] = df.groupby("Team")["_home_pts"].transform(_pit_expanding)
+    # Away only
+    df["_away_pts"] = df["Team_Final_Score"].where(away_mask)
+    df["off_ppg_away"] = df.groupby("Team")["_away_pts"].transform(_pit_expanding)
 
-    # Clean up temp columns
-    df = df.drop(columns=["_conf_score", "_conf_opp_score", "_conf_margin"])
+    # =====================================================================
+    # 5. DEFENSE — Opp PPG allowed (overall, conference, home, away)
+    # =====================================================================
+    df["def_ppg"] = df.groupby("Team")["Opp_Final_Score"].transform(_pit_expanding)
+    df["_conf_opp_pts"] = df["Opp_Final_Score"].where(conf_mask)
+    df["def_ppg_conf"] = df.groupby("Team")["_conf_opp_pts"].transform(_pit_expanding)
+    df["_home_opp_pts"] = df["Opp_Final_Score"].where(home_mask)
+    df["def_ppg_home"] = df.groupby("Team")["_home_opp_pts"].transform(_pit_expanding)
+    df["_away_opp_pts"] = df["Opp_Final_Score"].where(away_mask)
+    df["def_ppg_away"] = df.groupby("Team")["_away_opp_pts"].transform(_pit_expanding)
 
-    # --- Defensive stats (how many points the team allows) ---
-    # team_avg_opp_score already captures this for the team.
-    # We also need it on a recent-form basis:
-    df["team_def_ppg_allowed"] = df["team_avg_opp_score"]  # alias for clarity
-    df["team_def_recent_allowed"] = df["team_recent_opp_score"]
+    # =====================================================================
+    # 6. WIN % (overall, conference, home, away)
+    # =====================================================================
+    df["win_pct"] = df.groupby("Team")["_won"].transform(_pit_expanding)
+    df["_won_conf"] = df["_won"].where(conf_mask)
+    df["win_pct_conf"] = df.groupby("Team")["_won_conf"].transform(_pit_expanding)
+    df["_won_home"] = df["_won"].where(home_mask)
+    df["win_pct_home"] = df.groupby("Team")["_won_home"].transform(_pit_expanding)
+    df["_won_away"] = df["_won"].where(away_mask)
+    df["win_pct_away"] = df.groupby("Team")["_won_away"].transform(_pit_expanding)
 
-    # --- Opponent defensive stats (how many points the OPPONENT allows) ---
-    # Since every game appears twice (once per team), we can self-join
-    # to get the opponent's defensive stats by matching mirror rows.
-    opp_lookup = df[["Date", "Team_Final_Score", "Opp_Final_Score",
-                     "team_def_ppg_allowed", "team_def_recent_allowed",
-                     "team_avg_score", "team_recent_score"]].copy()
-    opp_lookup = opp_lookup.rename(columns={
-        "team_def_ppg_allowed": "opp_def_ppg_allowed",
-        "team_def_recent_allowed": "opp_def_recent_allowed",
-        "team_avg_score": "opp_avg_score",
-        "team_recent_score": "opp_recent_score",
-    })
-    # Drop exact duplicates to avoid many-to-many merge issues
+    # =====================================================================
+    # 7. ATS % (overall, conference, home, away)
+    # =====================================================================
+    df["ats_pct"] = df.groupby("Team")["_covered"].transform(_pit_expanding)
+    df["_cov_conf"] = df["_covered"].where(conf_mask)
+    df["ats_pct_conf"] = df.groupby("Team")["_cov_conf"].transform(_pit_expanding)
+    df["_cov_home"] = df["_covered"].where(home_mask)
+    df["ats_pct_home"] = df.groupby("Team")["_cov_home"].transform(_pit_expanding)
+    df["_cov_away"] = df["_covered"].where(away_mask)
+    df["ats_pct_away"] = df.groupby("Team")["_cov_away"].transform(_pit_expanding)
+
+    # =====================================================================
+    # 8. FORM — rolling 3 and 5 game windows
+    # =====================================================================
+    for window in [3, 5]:
+        w = str(window)
+        df[f"form{w}_off"] = df.groupby("Team")["Team_Final_Score"].transform(
+            lambda x, win=window: _pit_roll(x, win))
+        df[f"form{w}_def"] = df.groupby("Team")["Opp_Final_Score"].transform(
+            lambda x, win=window: _pit_roll(x, win))
+        df[f"form{w}_margin"] = df.groupby("Team")["margin"].transform(
+            lambda x, win=window: _pit_roll(x, win))
+        df[f"form{w}_ats"] = df.groupby("Team")["_covered"].transform(
+            lambda x, win=window: _pit_roll(x, win))
+        df[f"form{w}_win"] = df.groupby("Team")["_won"].transform(
+            lambda x, win=window: _pit_roll(x, win))
+
+    # Conference-specific rolling form
+    for window in [3, 5]:
+        w = str(window)
+        df[f"form{w}_off_conf"] = df.groupby("Team")["_conf_pts"].transform(
+            lambda x, win=window: _pit_roll(x, win))
+        df[f"form{w}_def_conf"] = df.groupby("Team")["_conf_opp_pts"].transform(
+            lambda x, win=window: _pit_roll(x, win))
+        df[f"form{w}_ats_conf"] = df.groupby("Team")["_cov_conf"].transform(
+            lambda x, win=window: _pit_roll(x, win))
+
+    # =====================================================================
+    # 9. MARGIN (overall, conference)
+    # =====================================================================
+    df["avg_margin"] = df.groupby("Team")["margin"].transform(_pit_expanding)
+    df["_conf_margin"] = df["margin"].where(conf_mask)
+    df["avg_margin_conf"] = df.groupby("Team")["_conf_margin"].transform(_pit_expanding)
+
+    # =====================================================================
+    # 10. OPPONENT STATS via self-join (mirror rows)
+    # =====================================================================
+    # Columns to look up from the opponent's side
+    opp_cols_to_join = [
+        "off_ppg", "off_ppg_conf", "off_ppg_home", "off_ppg_away",
+        "def_ppg", "def_ppg_conf", "def_ppg_home", "def_ppg_away",
+        "win_pct", "win_pct_conf", "win_pct_home", "win_pct_away",
+        "ats_pct", "ats_pct_conf", "ats_pct_home", "ats_pct_away",
+        "avg_margin", "avg_margin_conf",
+        "form5_off", "form5_def", "form5_margin", "form5_ats",
+        "form3_off", "form3_def", "form3_margin", "form3_ats",
+        "form5_off_conf", "form5_def_conf", "form5_ats_conf",
+    ]
+
+    opp_lookup = df[["Date", "Team_Final_Score", "Opp_Final_Score"]
+                     + opp_cols_to_join].copy()
+    opp_lookup = opp_lookup.rename(columns={c: f"opp_{c}" for c in opp_cols_to_join})
     opp_lookup = opp_lookup.drop_duplicates(
         subset=["Date", "Team_Final_Score", "Opp_Final_Score"]
     )
@@ -221,28 +282,65 @@ def build_features(df):
         how="left",
         suffixes=("", "_merge"),
     )
-    # Clean up duplicate columns from merge
     for c in list(df.columns):
         if c.endswith("_merge"):
             df = df.drop(columns=[c])
 
-    # --- Matchup features: offense vs defense ---
-    # Team offense vs opponent defense (positive = offense outpaces defense)
-    df["off_vs_def"] = df["team_avg_score"] - df["opp_def_ppg_allowed"]
+    # =====================================================================
+    # 11. MATCHUP FEATURES — offense vs defense interactions
+    # =====================================================================
+    # Team offense vs opponent defense
+    df["off_vs_def"] = df["off_ppg"] - df["opp_def_ppg"]
+    df["off_vs_def_conf"] = df["off_ppg_conf"] - df["opp_def_ppg_conf"]
+    df["off_vs_def_form5"] = df["form5_off"] - df["opp_form5_def"]
+    df["off_vs_def_form3"] = df["form3_off"] - df["opp_form3_def"]
     # Opponent offense vs team defense
-    df["opp_off_vs_def"] = df["opp_avg_score"] - df["team_def_ppg_allowed"]
-    # Recent form matchup
-    df["off_vs_def_recent"] = df["team_recent_score"] - df["opp_def_recent_allowed"]
+    df["opp_off_vs_def"] = df["opp_off_ppg"] - df["def_ppg"]
+    df["opp_off_vs_def_conf"] = df["opp_off_ppg_conf"] - df["def_ppg_conf"]
+    # PPG differentials
+    df["ppg_diff"] = df["off_ppg"] - df["opp_off_ppg"]
+    df["ppg_diff_conf"] = df["off_ppg_conf"] - df["opp_off_ppg_conf"]
 
-    # --- Total points / over-under proxy ---
+    # =====================================================================
+    # 12. CONFERENCE-WEIGHTED BLENDS
+    # =====================================================================
+    # For conference/tournament games, conference stats are more predictive.
+    # Create blended features: 70% conference + 30% overall when conf data
+    # exists, otherwise fall back to overall.
+    CONF_WEIGHT = 0.7
+
+    def _blend(overall, conf):
+        """Blend conference and overall stats, favoring conference."""
+        return conf.fillna(overall) * CONF_WEIGHT + overall * (1 - CONF_WEIGHT)
+
+    df["blend_off"] = _blend(df["off_ppg"], df["off_ppg_conf"])
+    df["blend_def"] = _blend(df["def_ppg"], df["def_ppg_conf"])
+    df["blend_margin"] = _blend(df["avg_margin"], df["avg_margin_conf"])
+    df["blend_ats"] = _blend(df["ats_pct"], df["ats_pct_conf"])
+    df["blend_win"] = _blend(df["win_pct"], df["win_pct_conf"])
+    # Opponent blends
+    df["opp_blend_off"] = _blend(df["opp_off_ppg"], df["opp_off_ppg_conf"])
+    df["opp_blend_def"] = _blend(df["opp_def_ppg"], df["opp_def_ppg_conf"])
+    df["opp_blend_margin"] = _blend(df["opp_avg_margin"], df["opp_avg_margin_conf"])
+    df["opp_blend_ats"] = _blend(df["opp_ats_pct"], df["opp_ats_pct_conf"])
+    # Blended matchup
+    df["blend_off_vs_def"] = df["blend_off"] - df["opp_blend_def"]
+    df["blend_opp_off_vs_def"] = df["opp_blend_off"] - df["blend_def"]
+    df["blend_ppg_diff"] = df["blend_off"] - df["opp_blend_off"]
+    df["blend_margin_diff"] = df["blend_margin"] - df["opp_blend_margin"]
+
+    # =====================================================================
+    # CLEANUP temp columns
+    # =====================================================================
+    temp_cols = [c for c in df.columns if c.startswith("_")]
+    df = df.drop(columns=temp_cols)
+
+    # =====================================================================
+    # TARGET VARIABLES
+    # =====================================================================
     df["total_points"] = df["Team_Final_Score"] + df["Opp_Final_Score"]
-
-    # --- ATS outcome (target for classification) ---
-    # Covered if Team_Final_Score + spread > Opp_Final_Score
-    # (spread is negative if team is favored)
     df["ats_margin"] = df["Team_Final_Score"] + df["spread"] - df["Opp_Final_Score"]
     df["covered"] = (df["ats_margin"] > 0).astype(int)
-    # Push = 0 margin exactly
     df["ats_push"] = (df["ats_margin"] == 0).astype(int)
 
     return df
@@ -253,25 +351,42 @@ def build_features(df):
 # ---------------------------------------------------------------------------
 
 SCORE_FEATURES = [
+    # --- Venue ---
     "is_home", "is_away", "is_neutral", "is_conf",
+    # --- Market ---
     "spread", "spread_move", "ml_implied_prob",
-    "Team_Record_pct", "Team_Home_Record_pct", "Team_Away_Record_pct",
-    "Team_Record_games",
-    "Opp_Record_pct", "Opp_Home_Record_pct", "Opp_Away_Record_pct",
-    "Team_PPG", "Team_Home_PPG", "Team_Away_PPG",
-    "Opp_PPG", "Opp_Home_PPG", "Opp_Away_PPG",
-    "ppg_diff",
-    "team_avg_margin", "team_avg_score", "team_avg_opp_score",
-    "team_recent_margin", "team_recent_score",
-    "Team_ATS_cover_pct", "Team_Home_ATS_cover_pct", "Team_Away_ATS_cover_pct",
-    "Opp_ATS_cover_pct",
-    # Defensive & matchup features
-    "team_def_ppg_allowed", "team_def_recent_allowed",
-    "opp_def_ppg_allowed", "opp_def_recent_allowed",
-    "off_vs_def", "opp_off_vs_def", "off_vs_def_recent",
-    # Conference-only stats
-    "conf_avg_score", "conf_avg_opp_score", "conf_avg_margin", "conf_ppg_diff",
-    "conf_ats_cover_pct", "conf_ats_recent",
+    # --- Team Offense (overall, conf, home, away) ---
+    "off_ppg", "off_ppg_conf", "off_ppg_home", "off_ppg_away",
+    # --- Team Defense (overall, conf, home, away) ---
+    "def_ppg", "def_ppg_conf", "def_ppg_home", "def_ppg_away",
+    # --- Win % (overall, conf, home, away) ---
+    "win_pct", "win_pct_conf", "win_pct_home", "win_pct_away",
+    # --- ATS % (overall, conf, home, away) ---
+    "ats_pct", "ats_pct_conf", "ats_pct_home", "ats_pct_away",
+    # --- Margin (overall, conf) ---
+    "avg_margin", "avg_margin_conf",
+    # --- Form: rolling 5 ---
+    "form5_off", "form5_def", "form5_margin", "form5_ats", "form5_win",
+    "form5_off_conf", "form5_def_conf", "form5_ats_conf",
+    # --- Form: rolling 3 ---
+    "form3_off", "form3_def", "form3_margin", "form3_ats", "form3_win",
+    # --- Opponent stats (overall, conf, home, away) ---
+    "opp_off_ppg", "opp_off_ppg_conf", "opp_off_ppg_home", "opp_off_ppg_away",
+    "opp_def_ppg", "opp_def_ppg_conf", "opp_def_ppg_home", "opp_def_ppg_away",
+    "opp_win_pct", "opp_win_pct_conf", "opp_win_pct_home", "opp_win_pct_away",
+    "opp_ats_pct", "opp_ats_pct_conf", "opp_ats_pct_home", "opp_ats_pct_away",
+    "opp_avg_margin", "opp_avg_margin_conf",
+    "opp_form5_off", "opp_form5_def", "opp_form5_margin", "opp_form5_ats",
+    "opp_form3_off", "opp_form3_def", "opp_form3_margin", "opp_form3_ats",
+    "opp_form5_off_conf", "opp_form5_def_conf", "opp_form5_ats_conf",
+    # --- Matchup interactions ---
+    "off_vs_def", "off_vs_def_conf", "off_vs_def_form5", "off_vs_def_form3",
+    "opp_off_vs_def", "opp_off_vs_def_conf",
+    "ppg_diff", "ppg_diff_conf",
+    # --- Conference-weighted blends (70% conf / 30% overall) ---
+    "blend_off", "blend_def", "blend_margin", "blend_ats", "blend_win",
+    "opp_blend_off", "opp_blend_def", "opp_blend_margin", "opp_blend_ats",
+    "blend_off_vs_def", "blend_opp_off_vs_def", "blend_ppg_diff", "blend_margin_diff",
 ]
 
 ATS_FEATURES = SCORE_FEATURES + [
@@ -290,8 +405,8 @@ def train_and_evaluate(df):
     # Filter to rows that have spread info and enough history
     mask = (
         df["spread"].notna()
-        & df["Team_PPG"].notna()
-        & df["team_avg_margin"].notna()
+        & df["off_ppg"].notna()
+        & df["avg_margin"].notna()
         & (df["Team_Record_games"] >= 3)
     )
     model_df = df[mask].copy().reset_index(drop=True)
