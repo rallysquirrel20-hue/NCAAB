@@ -128,6 +128,14 @@ def build_game_features(team_stats, opp_stats, game_info):
         "Team_Home_ATS_cover_pct": team_stats.get("Team_Home_ATS_cover_pct", 0.5),
         "Team_Away_ATS_cover_pct": team_stats.get("Team_Away_ATS_cover_pct", 0.5),
         "Opp_ATS_cover_pct": opp_stats.get("Team_ATS_cover_pct", 0.5),
+        # Defensive & matchup features
+        "team_def_ppg_allowed": team_stats.get("team_def_ppg_allowed", 70),
+        "team_def_recent_allowed": team_stats.get("team_def_recent_allowed", 70),
+        "opp_def_ppg_allowed": opp_stats.get("team_def_ppg_allowed", 70),
+        "opp_def_recent_allowed": opp_stats.get("team_def_recent_allowed", 70),
+        "off_vs_def": team_stats.get("team_avg_score", 75) - opp_stats.get("team_def_ppg_allowed", 70),
+        "opp_off_vs_def": opp_stats.get("team_avg_score", 75) - team_stats.get("team_def_ppg_allowed", 70),
+        "off_vs_def_recent": team_stats.get("team_recent_score", 75) - opp_stats.get("team_def_recent_allowed", 70),
         "spread_open": spread_open,
     }
     # Handle NaNs

@@ -149,6 +149,52 @@ def build_features(df):
     df["team_recent_score"] = df.groupby("Team")["Team_Final_Score"].transform(
         lambda x: x.shift(1).rolling(5, min_periods=1).mean()
     )
+    df["team_recent_opp_score"] = df.groupby("Team")["Opp_Final_Score"].transform(
+        lambda x: x.shift(1).rolling(5, min_periods=1).mean()
+    )
+
+    # --- Defensive stats (how many points the team allows) ---
+    # team_avg_opp_score already captures this for the team.
+    # We also need it on a recent-form basis:
+    df["team_def_ppg_allowed"] = df["team_avg_opp_score"]  # alias for clarity
+    df["team_def_recent_allowed"] = df["team_recent_opp_score"]
+
+    # --- Opponent defensive stats (how many points the OPPONENT allows) ---
+    # Since every game appears twice (once per team), we can self-join
+    # to get the opponent's defensive stats by matching mirror rows.
+    opp_lookup = df[["Date", "Team_Final_Score", "Opp_Final_Score",
+                     "team_def_ppg_allowed", "team_def_recent_allowed",
+                     "team_avg_score", "team_recent_score"]].copy()
+    opp_lookup = opp_lookup.rename(columns={
+        "team_def_ppg_allowed": "opp_def_ppg_allowed",
+        "team_def_recent_allowed": "opp_def_recent_allowed",
+        "team_avg_score": "opp_avg_score",
+        "team_recent_score": "opp_recent_score",
+    })
+    # Drop exact duplicates to avoid many-to-many merge issues
+    opp_lookup = opp_lookup.drop_duplicates(
+        subset=["Date", "Team_Final_Score", "Opp_Final_Score"]
+    )
+
+    df = df.merge(
+        opp_lookup,
+        left_on=["Date", "Team_Final_Score", "Opp_Final_Score"],
+        right_on=["Date", "Opp_Final_Score", "Team_Final_Score"],
+        how="left",
+        suffixes=("", "_merge"),
+    )
+    # Clean up duplicate columns from merge
+    for c in list(df.columns):
+        if c.endswith("_merge"):
+            df = df.drop(columns=[c])
+
+    # --- Matchup features: offense vs defense ---
+    # Team offense vs opponent defense (positive = offense outpaces defense)
+    df["off_vs_def"] = df["team_avg_score"] - df["opp_def_ppg_allowed"]
+    # Opponent offense vs team defense
+    df["opp_off_vs_def"] = df["opp_avg_score"] - df["team_def_ppg_allowed"]
+    # Recent form matchup
+    df["off_vs_def_recent"] = df["team_recent_score"] - df["opp_def_recent_allowed"]
 
     # --- Total points / over-under proxy ---
     df["total_points"] = df["Team_Final_Score"] + df["Opp_Final_Score"]
@@ -181,6 +227,10 @@ SCORE_FEATURES = [
     "team_recent_margin", "team_recent_score",
     "Team_ATS_cover_pct", "Team_Home_ATS_cover_pct", "Team_Away_ATS_cover_pct",
     "Opp_ATS_cover_pct",
+    # Defensive & matchup features
+    "team_def_ppg_allowed", "team_def_recent_allowed",
+    "opp_def_ppg_allowed", "opp_def_recent_allowed",
+    "off_vs_def", "opp_off_vs_def", "off_vs_def_recent",
 ]
 
 ATS_FEATURES = SCORE_FEATURES + [
