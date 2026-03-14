@@ -72,6 +72,12 @@ todays_games = [
     # ACC Tournament Championship
     ("Duke",     "Virginia", "neutral", "N", -8.5, -8.5, -365),
     ("Virginia", "Duke",     "neutral", "N",  8.5,  8.5,  281),
+    # Big 12 Tournament Championship
+    ("Arizona",  "Houston",  "neutral", "N", -2.5, -2.5, -150),
+    ("Houston",  "Arizona",  "neutral", "N",  2.5,  2.5,  125),
+    # Big East Tournament Championship
+    ("UConn",      "St. John's", "neutral", "N", -3.0, -2.5, -140),
+    ("St. John's", "UConn",      "neutral", "N",  3.0,  2.5,  116),
 ]
 
 print("=" * 85)
