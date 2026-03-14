@@ -354,39 +354,18 @@ SCORE_FEATURES = [
     # --- Venue ---
     "is_home", "is_away", "is_neutral", "is_conf",
     # --- Market ---
-    "spread", "spread_move", "ml_implied_prob",
-    # --- Team Offense (overall, conf, home, away) ---
-    "off_ppg", "off_ppg_conf", "off_ppg_home", "off_ppg_away",
-    # --- Team Defense (overall, conf, home, away) ---
-    "def_ppg", "def_ppg_conf", "def_ppg_home", "def_ppg_away",
-    # --- Win % (overall, conf, home, away) ---
-    "win_pct", "win_pct_conf", "win_pct_home", "win_pct_away",
-    # --- ATS % (overall, conf, home, away) ---
-    "ats_pct", "ats_pct_conf", "ats_pct_home", "ats_pct_away",
-    # --- Margin (overall, conf) ---
-    "avg_margin", "avg_margin_conf",
-    # --- Form: rolling 5 ---
-    "form5_off", "form5_def", "form5_margin", "form5_ats", "form5_win",
-    "form5_off_conf", "form5_def_conf", "form5_ats_conf",
-    # --- Form: rolling 3 ---
-    "form3_off", "form3_def", "form3_margin", "form3_ats", "form3_win",
-    # --- Opponent stats (overall, conf, home, away) ---
-    "opp_off_ppg", "opp_off_ppg_conf", "opp_off_ppg_home", "opp_off_ppg_away",
-    "opp_def_ppg", "opp_def_ppg_conf", "opp_def_ppg_home", "opp_def_ppg_away",
-    "opp_win_pct", "opp_win_pct_conf", "opp_win_pct_home", "opp_win_pct_away",
-    "opp_ats_pct", "opp_ats_pct_conf", "opp_ats_pct_home", "opp_ats_pct_away",
-    "opp_avg_margin", "opp_avg_margin_conf",
-    "opp_form5_off", "opp_form5_def", "opp_form5_margin", "opp_form5_ats",
-    "opp_form3_off", "opp_form3_def", "opp_form3_margin", "opp_form3_ats",
-    "opp_form5_off_conf", "opp_form5_def_conf", "opp_form5_ats_conf",
-    # --- Matchup interactions ---
-    "off_vs_def", "off_vs_def_conf", "off_vs_def_form5", "off_vs_def_form3",
-    "opp_off_vs_def", "opp_off_vs_def_conf",
-    "ppg_diff", "ppg_diff_conf",
-    # --- Conference-weighted blends (70% conf / 30% overall) ---
+    "spread", "spread_open", "ml_implied_prob",
+    # --- Conference-weighted blends (70% conf / 30% overall — single number per stat) ---
     "blend_off", "blend_def", "blend_margin", "blend_ats", "blend_win",
     "opp_blend_off", "opp_blend_def", "opp_blend_margin", "opp_blend_ats",
     "blend_off_vs_def", "blend_opp_off_vs_def", "blend_ppg_diff", "blend_margin_diff",
+    # --- Form: rolling 5 ---
+    "form5_off", "form5_def", "form5_margin", "form5_ats", "form5_win",
+    # --- Form: rolling 3 ---
+    "form3_off", "form3_def", "form3_margin", "form3_ats", "form3_win",
+    # --- Opponent form ---
+    "opp_form5_off", "opp_form5_def", "opp_form5_margin", "opp_form5_ats",
+    "opp_form3_off", "opp_form3_def", "opp_form3_margin", "opp_form3_ats",
 ]
 
 ATS_FEATURES = [
