@@ -393,26 +393,16 @@ ATS_FEATURES = [
     # --- Score model's view: predicted margin vs spread (most important signal) ---
     "pred_margin_vs_spread",
     # --- Market ---
-    "spread", "spread_open", "spread_move", "ml_implied_prob",
+    "spread", "spread_open", "ml_implied_prob",
     # --- Venue ---
     "is_home", "is_away", "is_neutral", "is_conf",
-    # --- ATS Records (heavily weighted — overall, conf, home, away) ---
-    "ats_pct", "ats_pct_conf", "ats_pct_home", "ats_pct_away",
-    "opp_ats_pct", "opp_ats_pct_conf", "opp_ats_pct_home", "opp_ats_pct_away",
-    # --- ATS Form (recent cover trends) ---
-    "form5_ats", "form5_ats_conf", "form3_ats",
-    "opp_form5_ats", "opp_form5_ats_conf", "opp_form3_ats",
-    # --- Conference-weighted blends (same inputs driving score model) ---
+    # --- Conference-weighted blends (70% conf / 30% overall — single number per stat) ---
     "blend_off", "blend_def", "blend_margin", "blend_ats", "blend_win",
     "opp_blend_off", "opp_blend_def", "opp_blend_margin", "opp_blend_ats",
     "blend_off_vs_def", "blend_opp_off_vs_def", "blend_ppg_diff", "blend_margin_diff",
-    # --- Matchup interactions ---
-    "off_vs_def", "off_vs_def_conf", "opp_off_vs_def", "opp_off_vs_def_conf",
-    "ppg_diff", "ppg_diff_conf",
-    # --- Win % (overall, conf) ---
-    "win_pct", "win_pct_conf", "opp_win_pct", "opp_win_pct_conf",
-    # --- Margin (overall, conf) ---
-    "avg_margin", "avg_margin_conf", "opp_avg_margin", "opp_avg_margin_conf",
+    # --- ATS Form (recent cover trends) ---
+    "form5_ats", "form3_ats",
+    "opp_form5_ats", "opp_form3_ats",
     # --- Recent form (scoring) ---
     "form5_margin", "form3_margin", "opp_form5_margin", "opp_form3_margin",
 ]
