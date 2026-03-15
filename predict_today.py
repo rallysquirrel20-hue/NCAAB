@@ -55,8 +55,8 @@ def get_latest_team_stats(team_name):
 # Format: (team, opponent, home_away, is_conf, closing_spread, opening_spread, closing_ml)
 todays_games = [
     # Big Ten Tournament — Championship
-    ("Purdue",   "Michigan", "neutral", "N", -3.5, -3.5, -165),
-    ("Michigan", "Purdue",   "neutral", "N",  3.5,  3.5,  140),
+    ("Michigan", "Purdue",   "neutral", "N", -5.0, -5.0, -210),
+    ("Purdue",   "Michigan", "neutral", "N",  5.0,  5.0,  175),
 ]
 
 print("=" * 85)
