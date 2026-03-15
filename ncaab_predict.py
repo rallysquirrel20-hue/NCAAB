@@ -1,12 +1,11 @@
 """
-NCAAB Score & ATS Prediction Model
+NCAAB Score Prediction Model
 ====================================
 Reads ncaab_game_logs.csv, engineers point-in-time features from
-cumulative stats, and trains models to:
-  1. Predict final scores for each team
-  2. Predict winners against the spread (ATS)
+cumulative stats, and trains a model to predict final scores for each team.
 
-Outputs a full evaluation report and next-game predictions.
+ATS picks are derived directly from the score model's predicted margin
+vs the spread — no separate ATS model needed.
 
 Usage:
     python ncaab_predict.py
@@ -18,13 +17,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
-from sklearn.linear_model import Ridge, LogisticRegression
+from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.metrics import (
     accuracy_score,
     mean_absolute_error,
     mean_squared_error,
-    classification_report,
 )
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
@@ -368,23 +365,12 @@ SCORE_FEATURES = [
     "opp_form3_off", "opp_form3_def", "opp_form3_margin", "opp_form3_ats",
 ]
 
-ATS_FEATURES = [
-    # --- Score model's view: predicted margin vs spread (most important signal) ---
-    "pred_margin_vs_spread",
-    # --- Market ---
-    "spread", "spread_open", "ml_implied_prob",
-    # --- Venue ---
-    "is_home", "is_away", "is_neutral", "is_conf",
-    # --- Conference-weighted blends (70% conf / 30% overall — single number per stat) ---
-    "blend_off", "blend_def", "blend_margin", "blend_ats", "blend_win",
-    "opp_blend_off", "opp_blend_def", "opp_blend_margin", "opp_blend_ats",
-    "blend_off_vs_def", "blend_opp_off_vs_def", "blend_ppg_diff", "blend_margin_diff",
-    # --- ATS Form (recent cover trends) ---
-    "form5_ats", "form3_ats",
-    "opp_form5_ats", "opp_form3_ats",
-    # --- Recent form (scoring) ---
-    "form5_margin", "form3_margin", "opp_form5_margin", "opp_form3_margin",
-]
+
+# ATS confidence thresholds (points of predicted margin vs spread)
+# These define how far the predicted margin must exceed the spread
+# to trigger a pick at each confidence level.
+ATS_STRONG_THRESHOLD = 4.0   # 4+ points beyond spread = STRONG pick
+ATS_LEAN_THRESHOLD = 1.5     # 1.5-4 points beyond spread = LEAN pick
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +378,7 @@ ATS_FEATURES = [
 # ---------------------------------------------------------------------------
 
 def train_and_evaluate(df):
-    """Train models and print evaluation report."""
+    """Train score models and evaluate. ATS is derived from margin vs spread."""
     df = df.copy()
 
     # Filter to rows that have spread info and enough history
@@ -406,7 +392,7 @@ def train_and_evaluate(df):
     print(f"Games with usable features: {len(model_df)}")
 
     # Fill remaining NaNs in features
-    for col in SCORE_FEATURES + ATS_FEATURES:
+    for col in SCORE_FEATURES:
         if col in model_df.columns:
             model_df[col] = model_df[col].fillna(model_df[col].median())
 
@@ -420,10 +406,10 @@ def train_and_evaluate(df):
     print(f"Test dates:  {test['Date'].min().date()} to {test['Date'].max().date()}")
 
     # =====================================================================
-    # MODEL 1: Score Prediction (Team Score & Opponent Score)
+    # SCORE PREDICTION (Team Score & Opponent Score)
     # =====================================================================
     print("\n" + "=" * 70)
-    print("MODEL 1: SCORE PREDICTION")
+    print("SCORE PREDICTION MODEL")
     print("=" * 70)
 
     X_train_s = train[SCORE_FEATURES].values
@@ -480,93 +466,48 @@ def train_and_evaluate(df):
     print(f"  Straight-Up Winner Accuracy: {su_acc:.1%}")
 
     # =====================================================================
-    # MODEL 2: ATS PREDICTION (Against the Spread)
+    # ATS EVALUATION (margin-vs-spread rule, no separate model)
     # =====================================================================
     print("\n" + "=" * 70)
-    print("MODEL 2: ATS (AGAINST THE SPREAD) PREDICTION")
+    print("ATS EVALUATION (Margin vs Spread — No Separate Model)")
     print("=" * 70)
 
-    # Compute pred_margin_vs_spread for ALL data using score models
-    # For train: use in-sample predictions (the ATS model learns the signal)
-    # For test: use out-of-sample predictions (fair evaluation)
-    all_X_s = scaler_s.transform(model_df[SCORE_FEATURES].values)
-    all_pred_team = model_team.predict(all_X_s)
-    all_pred_opp = model_opp.predict(all_X_s)
-    model_df["pred_margin_vs_spread"] = (all_pred_team - all_pred_opp) - model_df["spread"].values
+    test_spreads = test["spread"].values
+    test_covered = test["covered"].values
+    test_push = test["ats_push"].values
+    pred_margin_vs_spread = pred_margin - test_spreads
 
-    # Re-split after adding the new column
-    train = model_df.iloc[:split_idx]
-    test = model_df.iloc[split_idx:]
+    # Remove pushes
+    non_push = test_push == 0
+    pmvs = pred_margin_vs_spread[non_push]
+    actual_cov = test_covered[non_push]
 
-    # Remove pushes for cleaner classification
-    train_ats = train[train["ats_push"] == 0].copy()
-    test_ats = test[test["ats_push"] == 0].copy()
-    print(f"\nAfter removing pushes -> Train: {len(train_ats)} | Test: {len(test_ats)}")
+    # Simple rule: if pred_margin > spread (i.e. pmvs > 0), predict cover
+    ats_pred = (pmvs > 0).astype(int)
+    ats_acc = accuracy_score(actual_cov, ats_pred)
+    print(f"\nOverall ATS Accuracy (margin > spread): {ats_acc:.1%}")
 
-    X_train_a = train_ats[ATS_FEATURES].values
-    X_test_a = test_ats[ATS_FEATURES].values
-    y_train_a = train_ats["covered"].values
-    y_test_a = test_ats["covered"].values
-
-    scaler_a = StandardScaler()
-    X_train_a = scaler_a.fit_transform(X_train_a)
-    X_test_a = scaler_a.transform(X_test_a)
-
-    # Logistic Regression baseline
-    lr_model = LogisticRegression(C=0.1, max_iter=1000, random_state=42)
-    lr_model.fit(X_train_a, y_train_a)
-    lr_pred = lr_model.predict(X_test_a)
-    lr_prob = lr_model.predict_proba(X_test_a)[:, 1]
-    lr_acc = accuracy_score(y_test_a, lr_pred)
-    print(f"\nLogistic Regression ATS Accuracy: {lr_acc:.1%}")
-
-    # Gradient Boosting
-    gb_model = GradientBoostingClassifier(
-        n_estimators=200, max_depth=3, learning_rate=0.05,
-        subsample=0.8, random_state=42
-    )
-    gb_model.fit(X_train_a, y_train_a)
-    gb_pred = gb_model.predict(X_test_a)
-    gb_prob = gb_model.predict_proba(X_test_a)[:, 1]
-    gb_acc = accuracy_score(y_test_a, gb_pred)
-    print(f"Gradient Boosting ATS Accuracy:   {gb_acc:.1%}")
-
-    # Use the better model
-    if gb_acc >= lr_acc:
-        best_ats_model = gb_model
-        best_ats_pred = gb_pred
-        best_ats_prob = gb_prob
-        best_name = "Gradient Boosting"
-    else:
-        best_ats_model = lr_model
-        best_ats_pred = lr_pred
-        best_ats_prob = lr_prob
-        best_name = "Logistic Regression"
-
-    print(f"\nBest ATS Model: {best_name}")
-    print(f"\nClassification Report:")
-    print(classification_report(y_test_a, best_ats_pred,
-                                target_names=["Did Not Cover", "Covered"]))
-
-    # Baseline: always pick the spread (50%)
-    base_rate = y_test_a.mean()
+    # Baseline
+    base_rate = actual_cov.mean()
     print(f"Test Set Cover Rate (baseline): {base_rate:.1%}")
 
-    # Confidence buckets
-    print("\nATS Accuracy by Confidence Bucket:")
-    print(f"  {'Bucket':<20} {'Games':>6} {'Accuracy':>10} {'Cover Rate':>12}")
-    print(f"  {'-'*50}")
-    for lo, hi, label in [(0.0, 0.4, "Strong No Cover"),
-                           (0.4, 0.45, "Lean No Cover"),
-                           (0.45, 0.55, "Toss-Up"),
-                           (0.55, 0.6, "Lean Cover"),
-                           (0.6, 1.0, "Strong Cover")]:
-        bucket_mask = (best_ats_prob >= lo) & (best_ats_prob < hi)
+    # Accuracy by edge size (how far predicted margin is from the spread)
+    print("\nATS Accuracy by Edge Size:")
+    print(f"  {'Edge Bucket':<25} {'Games':>6} {'Accuracy':>10} {'Cover Rate':>12}")
+    print(f"  {'-'*55}")
+    for lo, hi, label in [
+        (ATS_STRONG_THRESHOLD, 99, f"STRONG Cover (>{ATS_STRONG_THRESHOLD:.1f} pts)"),
+        (ATS_LEAN_THRESHOLD, ATS_STRONG_THRESHOLD, f"LEAN Cover ({ATS_LEAN_THRESHOLD:.1f}-{ATS_STRONG_THRESHOLD:.1f} pts)"),
+        (-ATS_LEAN_THRESHOLD, ATS_LEAN_THRESHOLD, f"Toss-Up (<{ATS_LEAN_THRESHOLD:.1f} pts)"),
+        (-ATS_STRONG_THRESHOLD, -ATS_LEAN_THRESHOLD, f"LEAN No Cover"),
+        (-99, -ATS_STRONG_THRESHOLD, f"STRONG No Cover"),
+    ]:
+        bucket_mask = (pmvs >= lo) & (pmvs < hi)
         n = bucket_mask.sum()
         if n > 0:
-            bucket_acc = accuracy_score(y_test_a[bucket_mask], best_ats_pred[bucket_mask])
-            actual_cover = y_test_a[bucket_mask].mean()
-            print(f"  {label:<20} {n:>6} {bucket_acc:>10.1%} {actual_cover:>12.1%}")
+            bucket_acc = accuracy_score(actual_cov[bucket_mask], ats_pred[bucket_mask])
+            actual_cover = actual_cov[bucket_mask].mean()
+            print(f"  {label:<25} {n:>6} {bucket_acc:>10.1%} {actual_cover:>12.1%}")
 
     # =====================================================================
     # FEATURE IMPORTANCE
@@ -580,19 +521,6 @@ def train_and_evaluate(df):
         bar = "█" * int(imp * 200)
         print(f"  {fname:<30} {imp:.4f}  {bar}")
 
-    print("\n" + "=" * 70)
-    print("FEATURE IMPORTANCE (ATS Prediction)")
-    print("=" * 70)
-    if best_name == "Gradient Boosting":
-        feat_imp_ats = sorted(zip(ATS_FEATURES, best_ats_model.feature_importances_),
-                              key=lambda x: -x[1])
-    else:
-        feat_imp_ats = sorted(zip(ATS_FEATURES, np.abs(best_ats_model.coef_[0])),
-                              key=lambda x: -x[1])
-    for fname, imp in feat_imp_ats[:15]:
-        bar = "█" * int(imp * 200)
-        print(f"  {fname:<30} {imp:.4f}  {bar}")
-
     # =====================================================================
     # SAMPLE PREDICTIONS ON TEST SET
     # =====================================================================
@@ -600,28 +528,25 @@ def train_and_evaluate(df):
     print("SAMPLE PREDICTIONS vs ACTUALS (last 20 test games)")
     print("=" * 70)
     sample = test.tail(20).copy()
-    sample_idx = sample.index
     sample_X = scaler_s.transform(sample[SCORE_FEATURES].values)
     sample_pred_team = model_team.predict(sample_X)
     sample_pred_opp = model_opp.predict(sample_X)
+    sample_pred_margin = sample_pred_team - sample_pred_opp
+    sample_pmvs = sample_pred_margin - sample["spread"].values
 
-    # ATS predictions for sample
-    sample_ats_X = scaler_a.transform(sample[ATS_FEATURES].values)
-    sample_ats_prob = best_ats_model.predict_proba(sample_ats_X)[:, 1]
-
-    print(f"\n  {'Team':<18} {'Opp':<18} {'Pred':>10} {'Actual':>10} {'Spread':>7} {'ATS%':>6} {'ATS':>5} {'Result':>7}")
+    print(f"\n  {'Team':<18} {'Opp':<18} {'Pred':>10} {'Actual':>10} {'Spread':>7} {'Edge':>6} {'ATS':>5} {'Result':>7}")
     print(f"  {'-'*82}")
     for i, (_, row) in enumerate(sample.iterrows()):
         pred_sc = f"{sample_pred_team[i]:.0f}-{sample_pred_opp[i]:.0f}"
         actual_sc = f"{row['Team_Final_Score']:.0f}-{row['Opp_Final_Score']:.0f}"
         spread = row["spread"]
-        ats_p = sample_ats_prob[i]
-        ats_call = "COV" if ats_p > 0.5 else "NO"
-        actual_cov = "COV" if row["covered"] == 1 else "NO"
-        right = "✓" if ats_call == actual_cov else "✗"
+        edge = sample_pmvs[i]
+        ats_call = "COV" if edge > 0 else "NO"
+        actual_cov_str = "COV" if row["covered"] == 1 else "NO"
+        right = "✓" if ats_call == actual_cov_str else "✗"
         team_short = row["Team"][:16]
         opp_short = str(row["Opponent"])[:16]
-        print(f"  {team_short:<18} {opp_short:<18} {pred_sc:>10} {actual_sc:>10} {spread:>+7.1f} {ats_p:>6.1%} {ats_call:>5} {right:>7}")
+        print(f"  {team_short:<18} {opp_short:<18} {pred_sc:>10} {actual_sc:>10} {spread:>+7.1f} {edge:>+6.1f} {ats_call:>5} {right:>7}")
 
     # =====================================================================
     # CROSS-VALIDATION
@@ -635,6 +560,7 @@ def train_and_evaluate(df):
     all_y_opp = model_df["Opp_Final_Score"].values
     all_y_cov = model_df["covered"].values
     all_spreads = model_df["spread"].values
+    all_push = model_df["ats_push"].values
 
     tscv = TimeSeriesSplit(n_splits=5)
     cv_mae = []
@@ -644,7 +570,6 @@ def train_and_evaluate(df):
         Xtr = sc.fit_transform(all_X_score[tr_idx])
         Xte = sc.transform(all_X_score[te_idx])
 
-        # Score model for this fold
         m_team = GradientBoostingRegressor(n_estimators=200, max_depth=4,
                                            learning_rate=0.05, subsample=0.8,
                                            random_state=42)
@@ -658,23 +583,12 @@ def train_and_evaluate(df):
         m_opp.fit(Xtr, all_y_opp[tr_idx])
         p_opp = m_opp.predict(Xte)
 
-        # Compute pred_margin_vs_spread for this fold
-        cv_df = model_df.copy()
-        all_p_team = m_team.predict(sc.transform(all_X_score))
-        all_p_opp = m_opp.predict(sc.transform(all_X_score))
-        cv_df["pred_margin_vs_spread"] = (all_p_team - all_p_opp) - all_spreads
-
-        cv_X_ats = cv_df[ATS_FEATURES].values
-        sc_a = StandardScaler()
-        Xtr_a = sc_a.fit_transform(cv_X_ats[tr_idx])
-        Xte_a = sc_a.transform(cv_X_ats[te_idx])
-
-        mc = GradientBoostingClassifier(n_estimators=200, max_depth=3,
-                                         learning_rate=0.05, subsample=0.8,
-                                         random_state=42)
-        mc.fit(Xtr_a, all_y_cov[tr_idx])
-        pc = mc.predict(Xte_a)
-        cv_ats_acc.append(accuracy_score(all_y_cov[te_idx], pc))
+        # ATS via margin-vs-spread rule
+        p_margin = p_team - p_opp
+        pmvs_cv = p_margin - all_spreads[te_idx]
+        non_push_cv = all_push[te_idx] == 0
+        ats_pred_cv = (pmvs_cv[non_push_cv] > 0).astype(int)
+        cv_ats_acc.append(accuracy_score(all_y_cov[te_idx][non_push_cv], ats_pred_cv))
 
         print(f"  Fold {fold+1}: Score MAE = {cv_mae[-1]:.2f}, ATS Acc = {cv_ats_acc[-1]:.1%}")
 
@@ -698,23 +612,16 @@ SCORE PREDICTION (Gradient Boosting Regressor):
   Margin      -> MAE: {mae_margin:.2f}
   Straight-Up -> {su_acc:.1%} accuracy
 
-ATS PREDICTION ({best_name}):
-  Accuracy: {accuracy_score(y_test_a, best_ats_pred):.1%} (baseline ~50%)
-
-Key Predictive Features:
-  - Closing spread & moneyline (market info)
-  - Team PPG and opponent PPG differential
-  - Recent form (last 5 game margins)
-  - Win percentage and ATS cover history
-  - Home/away advantage
+ATS (Margin vs Spread rule — no separate model):
+  Accuracy: {ats_acc:.1%} (baseline ~50%)
+  Method: If predicted margin > spread, take the cover.
+  Confidence from edge size (how many points beyond the spread).
 """)
 
     return {
         "model_team": model_team,
         "model_opp": model_opp,
-        "ats_model": best_ats_model,
         "scaler_score": scaler_s,
-        "scaler_ats": scaler_a,
         "df": model_df,
     }
 

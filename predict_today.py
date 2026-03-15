@@ -1,12 +1,12 @@
 """
-Run predictions for today's games (March 14, 2026) using the trained model.
+Run predictions for today's games (March 15, 2026) using the trained model.
+ATS picks derived directly from predicted margin vs spread — no separate ATS model.
 """
 import sys
 import numpy as np
 import pandas as pd
-from ncaab_predict import build_features, SCORE_FEATURES, ATS_FEATURES
-from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
-from sklearn.linear_model import LogisticRegression
+from ncaab_predict import build_features, SCORE_FEATURES, ATS_STRONG_THRESHOLD, ATS_LEAN_THRESHOLD
+from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 
 # ── Load and prepare data ──────────────────────────────────────────────────
@@ -21,13 +21,13 @@ mask = (
     & (df["Team_Record_games"] >= 3)
 )
 train_df = df[mask].copy().sort_values("Date").reset_index(drop=True)
-for col in SCORE_FEATURES + ATS_FEATURES:
+for col in SCORE_FEATURES:
     if col in train_df.columns:
         train_df[col] = train_df[col].fillna(train_df[col].median())
 
 print(f"Training on {len(train_df)} historical games...\n")
 
-# ── Train models on ALL available data ─────────────────────────────────────
+# ── Train score models on ALL available data ──────────────────────────────
 scaler_s = StandardScaler()
 X_s = scaler_s.fit_transform(train_df[SCORE_FEATURES].values)
 
@@ -43,18 +43,6 @@ model_opp = GradientBoostingRegressor(
 )
 model_opp.fit(X_s, train_df["Opp_Final_Score"].values)
 
-# Compute pred_margin_vs_spread for training ATS model
-all_pred_team = model_team.predict(X_s)
-all_pred_opp = model_opp.predict(X_s)
-train_df["pred_margin_vs_spread"] = (all_pred_team - all_pred_opp) - train_df["spread"].values
-
-scaler_a = StandardScaler()
-train_ats = train_df[train_df["ats_push"] == 0]
-X_a = scaler_a.fit_transform(train_ats[ATS_FEATURES].values)
-
-ats_model = LogisticRegression(C=0.1, max_iter=1000, random_state=42)
-ats_model.fit(X_a, train_ats["covered"].values)
-
 # ── Helper: get latest stats for a team ────────────────────────────────────
 def get_latest_team_stats(team_name):
     """Pull the most recent row for a team to get their current cumulative stats."""
@@ -66,27 +54,13 @@ def get_latest_team_stats(team_name):
 # ── Today's games ──────────────────────────────────────────────────────────
 # Format: (team, opponent, home_away, is_conf, closing_spread, opening_spread, closing_ml)
 todays_games = [
-    # Big Ten Tournament Semifinals
-    ("Michigan",  "Wisconsin", "neutral", "N", -12.5, -12.5, -893),
-    ("Wisconsin", "Michigan",  "neutral", "N",  12.5,  12.5,  581),
-    ("Purdue",    "UCLA",      "neutral", "N",  -7.5,  -8.0, -310),
-    ("UCLA",      "Purdue",    "neutral", "N",   7.5,   8.0,  290),
-    # SEC Tournament Semifinal
-    ("Florida",    "Vanderbilt", "neutral", "N", -8.5, -8.5, -395),
-    ("Vanderbilt", "Florida",    "neutral", "N",  8.5,  8.5,  310),
-    # ACC Tournament Championship
-    ("Duke",     "Virginia", "neutral", "N", -8.5, -8.5, -365),
-    ("Virginia", "Duke",     "neutral", "N",  8.5,  8.5,  281),
-    # Big 12 Tournament Championship
-    ("Arizona",  "Houston",  "neutral", "N", -2.5, -2.5, -150),
-    ("Houston",  "Arizona",  "neutral", "N",  2.5,  2.5,  125),
-    # Big East Tournament Championship
-    ("UConn",      "St. John's", "neutral", "N", -3.0, -2.5, -140),
-    ("St. John's", "UConn",      "neutral", "N",  3.0,  2.5,  116),
+    # Big Ten Tournament — Championship
+    ("Purdue",   "Michigan", "neutral", "N", -3.5, -3.5, -165),
+    ("Michigan", "Purdue",   "neutral", "N",  3.5,  3.5,  140),
 ]
 
 print("=" * 85)
-print("PREDICTIONS FOR MARCH 14, 2026 — CONFERENCE TOURNAMENT DAY")
+print("PREDICTIONS FOR MARCH 15, 2026 — CONFERENCE TOURNAMENT DAY")
 print("=" * 85)
 
 # Process in pairs (both sides of same game)
@@ -98,11 +72,7 @@ def ml_to_prob(ml_val):
 
 
 def build_game_features(team_stats, opp_stats, game_info):
-    """Build feature dict for one side of a game.
-
-    Pulls team stats from team_stats row, opponent stats from opp_stats row.
-    For 'opp_*' features, we look up the corresponding team-side stat from opp_stats.
-    """
+    """Build feature dict for one side of a game."""
     spread = game_info[4]
     spread_open = game_info[5]
     ml = game_info[6]
@@ -253,23 +223,19 @@ for i in range(0, len(todays_games), 2):
     dog_pred_team = model_team.predict(X_dog_s)[0]
     dog_pred_opp = model_opp.predict(X_dog_s)[0]
 
-    # Add pred_margin_vs_spread for ATS model (score model's view of the spread)
-    fav_feat["pred_margin_vs_spread"] = (fav_pred_team - fav_pred_opp) - fav_info[4]
-    dog_feat["pred_margin_vs_spread"] = (dog_pred_team - dog_pred_opp) - dog_info[4]
+    # Predicted margin from favorite's perspective
+    pred_margin = fav_pred_team - fav_pred_opp
 
-    # ATS predictions
-    X_fav_a = scaler_a.transform([[fav_feat[f] for f in ATS_FEATURES]])
-    fav_ats_prob = ats_model.predict_proba(X_fav_a)[0][1]
-
-    X_dog_a = scaler_a.transform([[dog_feat[f] for f in ATS_FEATURES]])
-    dog_ats_prob = ats_model.predict_proba(X_dog_a)[0][1]
+    # Edge = how far predicted margin exceeds the spread
+    fav_edge = pred_margin - fav_info[4]   # pred_margin - spread (spread is negative for fav)
+    dog_edge = -pred_margin - dog_info[4]   # flip margin for dog perspective
 
     games_output.append({
         "fav": fav_name, "dog": dog_name,
         "fav_spread": fav_info[4], "dog_spread": dog_info[4],
         "pred_fav_score": fav_pred_team, "pred_dog_score": fav_pred_opp,
-        "pred_margin": fav_pred_team - fav_pred_opp,
-        "fav_ats_prob": fav_ats_prob, "dog_ats_prob": dog_ats_prob,
+        "pred_margin": pred_margin,
+        "fav_edge": fav_edge, "dog_edge": dog_edge,
     })
 
 # Print results
@@ -282,34 +248,44 @@ for g in games_output:
     print(f"  Predicted Score:  {fav} {g['pred_fav_score']:.0f}  —  {dog} {g['pred_dog_score']:.0f}")
     print(f"  Predicted Margin: {fav} by {g['pred_margin']:.1f} points")
     print(f"  Vegas Spread:     {fav} {g['fav_spread']:+.1f}")
-    print(f"  Model vs Vegas:   Model has {fav} winning by {abs(g['pred_margin']):.1f} vs line of {abs(g['fav_spread']):.1f}")
 
-    # ATS call
+    # ATS analysis using edge (predicted margin vs spread)
     print()
-    print(f"  ATS Analysis:")
-    print(f"    {fav:<15} cover prob: {g['fav_ats_prob']:.1%}")
-    print(f"    {dog:<15} cover prob: {g['dog_ats_prob']:.1%}")
+    print(f"  ATS Analysis (predicted margin vs spread):")
+    print(f"    {fav:<15} edge: {g['fav_edge']:+.1f} pts beyond spread")
+    print(f"    {dog:<15} edge: {g['dog_edge']:+.1f} pts beyond spread")
 
-    # Determine pick
-    if g["fav_ats_prob"] > 0.55:
+    # Determine pick based on edge thresholds
+    fav_edge = g["fav_edge"]
+    dog_edge = g["dog_edge"]
+
+    if fav_edge >= ATS_STRONG_THRESHOLD:
         pick = f"{fav} {g['fav_spread']:+.1f}"
-        conf = g["fav_ats_prob"]
-        strength = "STRONG" if g["fav_ats_prob"] > 0.6 else "LEAN"
-    elif g["dog_ats_prob"] > 0.55:
+        strength = "STRONG"
+        edge = fav_edge
+    elif fav_edge >= ATS_LEAN_THRESHOLD:
+        pick = f"{fav} {g['fav_spread']:+.1f}"
+        strength = "LEAN"
+        edge = fav_edge
+    elif dog_edge >= ATS_STRONG_THRESHOLD:
         pick = f"{dog} {g['dog_spread']:+.1f}"
-        conf = g["dog_ats_prob"]
-        strength = "STRONG" if g["dog_ats_prob"] > 0.6 else "LEAN"
+        strength = "STRONG"
+        edge = dog_edge
+    elif dog_edge >= ATS_LEAN_THRESHOLD:
+        pick = f"{dog} {g['dog_spread']:+.1f}"
+        strength = "LEAN"
+        edge = dog_edge
     else:
         pick = "NO EDGE (Toss-up)"
-        conf = max(g["fav_ats_prob"], g["dog_ats_prob"])
         strength = "PASS"
+        edge = max(abs(fav_edge), abs(dog_edge))
 
     winner = fav if g["pred_margin"] > 0 else dog
     print()
     print(f"  >> STRAIGHT-UP PICK: {winner}")
-    print(f"  >> ATS PICK:         {pick}  [{strength}] ({conf:.1%} confidence)")
+    print(f"  >> ATS PICK:         {pick}  [{strength}] ({edge:+.1f} pts edge)")
 
 print(f"\n{'=' * 85}")
 print("DISCLAIMER: Model predictions for informational purposes only.")
-print("ATS accuracy in backtesting: ~52%. High-confidence picks (>55%): ~67%.")
+print(f"ATS method: predicted margin vs spread. Thresholds: LEAN={ATS_LEAN_THRESHOLD} pts, STRONG={ATS_STRONG_THRESHOLD} pts.")
 print(f"{'=' * 85}")
