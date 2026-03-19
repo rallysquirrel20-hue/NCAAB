@@ -5,6 +5,7 @@ NCAAB Daily Game Log Builder
 Four-phase incremental pipeline:
 
   Phase 1 -- Fetch new games      (ESPN scoreboard, 1 API call / date)
+             + boxscore stats     (ESPN summary, 1 API call / event)
   Phase 2 -- Fetch odds           (The Odds API, 2 calls / NEW date only)
   Phase 3 -- Compute PIT stats    (pure math, zero API calls)
   Phase 4 -- Export CSV           (write final output)
@@ -16,6 +17,8 @@ Season: 2025-26
 
 Usage:
     python ncaab_daily_builder.py
+    python ncaab_daily_builder.py --backfill-odds
+    python ncaab_daily_builder.py --backfill-boxscore
 """
 
 import json
@@ -63,6 +66,24 @@ def _now_str() -> str:
 
 def _sleep():
     time.sleep(RATE_LIMIT_SEC)
+
+
+def _safe_int(val) -> int | None:
+    """Parse a value as int, returning None on failure."""
+    try:
+        return int(float(str(val).strip()))
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_acc(val) -> int:
+    """Safe accumulate: return int value or 0 if null/NaN."""
+    if pd.notna(val):
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return 0
+    return 0
 
 
 def api_get(url: str, params: dict | None = None, tag: str = "") -> dict | None:
@@ -197,6 +218,13 @@ RAW_COLUMNS = [
     "home_away", "neutral_site", "conference_game",
     "team_score", "opp_score", "win_loss",
     "team_1h", "opp_1h",
+    # Boxscore raw stats (per game, from summary)
+    "team_fgm", "team_fga", "team_3pm", "team_3pa", "team_ftm", "team_fta",
+    "team_oreb", "team_dreb", "team_to",
+    "opp_fgm", "opp_fga", "opp_3pm", "opp_3pa", "opp_ftm", "opp_fta",
+    "opp_oreb", "opp_dreb", "opp_to",
+    # Opponent AP rank at game time
+    "opp_ap_rank",
 ]
 
 ODDS_COLUMNS = [
@@ -205,12 +233,41 @@ ODDS_COLUMNS = [
 ]
 
 PIT_COLUMNS = [
+    # Record
     "team_record", "team_home_record", "team_neutral_record", "team_away_record",
     "opp_record", "opp_home_record", "opp_neutral_record", "opp_away_record",
+    # ATS
     "team_ats", "team_home_ats", "team_neutral_ats", "team_away_ats",
     "opp_ats", "opp_home_ats", "opp_neutral_ats", "opp_away_ats",
+    # PPG
     "team_ppg", "team_home_ppg", "team_neutral_ppg", "team_away_ppg",
     "opp_ppg", "opp_home_ppg", "opp_neutral_ppg", "opp_away_ppg",
+    # Team offensive shooting
+    "team_ftm_pg", "team_fta_pg", "team_ft_pct",
+    "team_3pm_pg", "team_3pa_pg", "team_3pt_pct",
+    "team_2pm_pg", "team_2pa_pg", "team_2pt_pct",
+    # Team defensive shooting allowed
+    "team_def_ftm_pg", "team_def_fta_pg", "team_def_ft_pct",
+    "team_def_3pm_pg", "team_def_3pa_pg", "team_def_3pt_pct",
+    "team_def_2pm_pg", "team_def_2pa_pg", "team_def_2pt_pct",
+    # Team rebounding & turnovers
+    "team_oreb_pg", "team_dreb_pg",
+    "team_to_pg", "team_forced_to_pg",
+    # Team pace & SOS
+    "team_pace", "team_sos",
+    # Opponent offensive shooting
+    "opp_ftm_pg", "opp_fta_pg", "opp_ft_pct",
+    "opp_3pm_pg", "opp_3pa_pg", "opp_3pt_pct",
+    "opp_2pm_pg", "opp_2pa_pg", "opp_2pt_pct",
+    # Opponent defensive shooting allowed
+    "opp_def_ftm_pg", "opp_def_fta_pg", "opp_def_ft_pct",
+    "opp_def_3pm_pg", "opp_def_3pa_pg", "opp_def_3pt_pct",
+    "opp_def_2pm_pg", "opp_def_2pa_pg", "opp_def_2pt_pct",
+    # Opponent rebounding & turnovers
+    "opp_oreb_pg", "opp_dreb_pg",
+    "opp_to_pg", "opp_forced_to_pg",
+    # Opponent pace & SOS
+    "opp_pace", "opp_sos",
 ]
 
 ALL_COLUMNS = RAW_COLUMNS + ODDS_COLUMNS + PIT_COLUMNS
@@ -223,21 +280,36 @@ def load_game_logs() -> pd.DataFrame:
 
 
 def save_game_logs(df: pd.DataFrame) -> None:
-    for col in ("team_1h", "opp_1h"):
-        df[col] = df[col].astype("Int64")
+    # Nullable integer columns
+    int_cols = [
+        "team_1h", "opp_1h",
+        "team_fgm", "team_fga", "team_3pm", "team_3pa",
+        "team_ftm", "team_fta", "team_oreb", "team_dreb", "team_to",
+        "opp_fgm", "opp_fga", "opp_3pm", "opp_3pa",
+        "opp_ftm", "opp_fta", "opp_oreb", "opp_dreb", "opp_to",
+        "opp_ap_rank",
+    ]
+    for col in int_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+
     # Ensure all expected columns exist
     for col in ALL_COLUMNS:
         if col not in df.columns:
             df[col] = None
-    # PPG columns: replace empty strings with None so pyarrow sees float
-    ppg_cols = [c for c in df.columns if c.endswith("_ppg")]
-    for col in ppg_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Numeric PIT columns: coerce to float for pyarrow
+    numeric_pit = [c for c in PIT_COLUMNS
+                   if c.endswith(("_ppg", "_pct", "_pg", "_pace", "_sos"))]
+    for col in numeric_pit:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     df.to_parquet(PARQUET_FILE, index=False, engine="pyarrow")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PHASE 1 — Fetch new games (ESPN scoreboard)
+# PHASE 1 — Fetch new games (ESPN scoreboard + summary boxscore)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _extract_score(competitor: dict) -> int:
@@ -266,6 +338,17 @@ def _parse_first_half(linescores: list) -> int | None:
             return int(float(first))
     except (ValueError, TypeError, IndexError):
         return None
+    return None
+
+
+def _extract_ap_rank(competitor: dict) -> int | None:
+    """Extract AP rank from a scoreboard competitor. None = unranked."""
+    rank_info = competitor.get("curatedRank", {})
+    if not rank_info:
+        return None
+    rank = rank_info.get("current")
+    if rank is not None and rank < 99:
+        return int(rank)
     return None
 
 
@@ -322,6 +405,7 @@ def parse_scoreboard(
                 "short_name": team_info.get("shortDisplayName",
                                             team_info.get("displayName", "")),
                 "first_half": _parse_first_half(c.get("linescores", [])),
+                "ap_rank": _extract_ap_rank(c),
                 "is_tracked": cid in tracked_ids,
             })
 
@@ -360,64 +444,227 @@ def parse_scoreboard(
                 "win_loss": win_loss,
                 "team_1h": team_c["first_half"],
                 "opp_1h": opp_c["first_half"],
+                "opp_ap_rank": opp_c["ap_rank"],
             })
 
     return rows
 
 
-def fetch_half_scores(
-    event_id: str, team_id: str,
-) -> tuple[int | None, int | None]:
-    url = f"{ESPN_BASE}/summary"
-    data = api_get(url, params={"event": event_id}, tag=f"summary-{event_id}")
+# ---------------------------------------------------------------------------
+# Game summary: half scores + boxscore stats
+# ---------------------------------------------------------------------------
+
+def fetch_game_summary(event_id: str) -> dict:
+    """Fetch summary and return {team_id: {stat_dict}} for both teams."""
+    data = api_get(
+        f"{ESPN_BASE}/summary",
+        params={"event": event_id},
+        tag=f"summary-{event_id}",
+    )
     if not data:
-        return (None, None)
+        return {}
+
+    result: dict[str, dict] = {}
+
+    # Half scores + AP rank from header
     header = data.get("header", {})
-    competitions = header.get("competitions", [])
-    if not competitions:
-        return (None, None)
-    team_1h = opp_1h = None
-    for c in competitions[0].get("competitors", []):
-        cid = str(c.get("id", ""))
-        fh = _parse_first_half(c.get("linescores", []))
-        if cid == team_id:
-            team_1h = fh
-        else:
-            opp_1h = fh
-    return (team_1h, opp_1h)
+    comps = header.get("competitions", [])
+    if comps:
+        for c in comps[0].get("competitors", []):
+            cid = str(c.get("id", ""))
+            result.setdefault(cid, {})
+            result[cid]["1h"] = _parse_first_half(c.get("linescores", []))
+            result[cid]["ap_rank"] = _extract_ap_rank(c)
+
+    # Boxscore stats
+    for team_box in data.get("boxscore", {}).get("teams", []):
+        tid = str(team_box.get("team", {}).get("id", ""))
+        if not tid:
+            continue
+        result.setdefault(tid, {})
+
+        stats: dict[str, str] = {}
+        for s in team_box.get("statistics", []):
+            stats[s.get("name", "")] = s.get("displayValue", "")
+
+        fg = stats.get("fieldGoalsMade-fieldGoalsAttempted", "").split("-")
+        result[tid]["fgm"] = _safe_int(fg[0]) if len(fg) == 2 else None
+        result[tid]["fga"] = _safe_int(fg[1]) if len(fg) == 2 else None
+
+        tp = stats.get(
+            "threePointFieldGoalsMade-threePointFieldGoalsAttempted", ""
+        ).split("-")
+        result[tid]["3pm"] = _safe_int(tp[0]) if len(tp) == 2 else None
+        result[tid]["3pa"] = _safe_int(tp[1]) if len(tp) == 2 else None
+
+        ft = stats.get("freeThrowsMade-freeThrowsAttempted", "").split("-")
+        result[tid]["ftm"] = _safe_int(ft[0]) if len(ft) == 2 else None
+        result[tid]["fta"] = _safe_int(ft[1]) if len(ft) == 2 else None
+
+        result[tid]["oreb"] = _safe_int(stats.get("offensiveRebounds"))
+        result[tid]["dreb"] = _safe_int(stats.get("defensiveRebounds"))
+        result[tid]["to"] = _safe_int(
+            stats.get("totalTurnovers", stats.get("turnovers"))
+        )
+
+    return result
 
 
-def backfill_half_scores(
+def backfill_game_details(
     day_games: list[dict], team_ids: dict[str, str],
 ) -> None:
-    """Fetch 1H scores via summary for games missing them (deduped)."""
-    needed: dict[str, str] = {}
+    """Fetch summary for games missing half scores or boxscore stats (deduped)."""
+    needed_eids: set[str] = set()
     for g in day_games:
-        if g["team_1h"] is not None:
-            continue
-        eid = g["event_id"]
-        if eid not in needed:
-            tid = team_ids.get(g["team"])
-            if tid:
-                needed[eid] = tid
-    if not needed:
+        if g.get("team_1h") is None or g.get("team_fgm") is None:
+            needed_eids.add(g["event_id"])
+    if not needed_eids:
         return
 
-    cache: dict[str, tuple] = {}
-    for eid, tid in needed.items():
-        t1h, o1h = fetch_half_scores(eid, tid)
-        cache[eid] = (t1h, o1h, tid)
+    # Fetch once per unique event
+    cache: dict[str, dict] = {}
+    for eid in needed_eids:
+        cache[eid] = fetch_game_summary(eid)
 
+    # Distribute to game rows
     for g in day_games:
         eid = g["event_id"]
-        if g["team_1h"] is not None or eid not in cache:
+        if eid not in cache:
             continue
-        t1h, o1h, fetched_tid = cache[eid]
+        summary = cache[eid]
         g_tid = team_ids.get(g["team"], "")
-        if g_tid == fetched_tid:
-            g["team_1h"], g["opp_1h"] = t1h, o1h
-        else:
-            g["team_1h"], g["opp_1h"] = o1h, t1h
+
+        # Find opponent's team ID in the summary
+        opp_tid = None
+        for tid in summary:
+            if tid != g_tid:
+                opp_tid = tid
+                break
+
+        team_data = summary.get(g_tid, {})
+        opp_data = summary.get(opp_tid, {}) if opp_tid else {}
+
+        # Half scores
+        if g.get("team_1h") is None:
+            g["team_1h"] = team_data.get("1h")
+            g["opp_1h"] = opp_data.get("1h")
+
+        # AP rank (fill from summary if scoreboard didn't have it)
+        if g.get("opp_ap_rank") is None and opp_data.get("ap_rank") is not None:
+            g["opp_ap_rank"] = opp_data["ap_rank"]
+
+        # Boxscore stats
+        if g.get("team_fgm") is None:
+            for stat in ("fgm", "fga", "3pm", "3pa", "ftm", "fta",
+                         "oreb", "dreb", "to"):
+                g[f"team_{stat}"] = team_data.get(stat)
+                g[f"opp_{stat}"] = opp_data.get(stat)
+
+
+def backfill_boxscore_data(
+    df: pd.DataFrame, team_ids: dict[str, str],
+) -> pd.DataFrame:
+    """Backfill boxscore stats + AP rank for existing games missing them."""
+    missing_mask = df["team_fgm"].isna()
+    if not missing_mask.any():
+        print(f"  [{_now_str()}] All rows already have boxscore data.")
+        return df
+
+    missing_events = df[missing_mask]["event_id"].unique()
+    print(f"  [{_now_str()}] Backfilling boxscore for "
+          f"{len(missing_events)} events ...")
+
+    for i, eid in enumerate(missing_events, 1):
+        if i % 50 == 0:
+            print(f"  [{_now_str()}] Progress: {i}/{len(missing_events)}")
+
+        summary = fetch_game_summary(eid)
+        if not summary:
+            continue
+
+        event_mask = df["event_id"] == eid
+        for idx in df[event_mask].index:
+            row = df.loc[idx]
+            g_tid = team_ids.get(row["team"], "")
+
+            opp_tid = None
+            for tid in summary:
+                if tid != g_tid:
+                    opp_tid = tid
+                    break
+
+            team_data = summary.get(g_tid, {})
+            opp_data = summary.get(opp_tid, {}) if opp_tid else {}
+
+            # Half scores
+            if pd.isna(row.get("team_1h")):
+                df.at[idx, "team_1h"] = team_data.get("1h")
+                df.at[idx, "opp_1h"] = opp_data.get("1h")
+
+            # AP rank
+            if pd.isna(row.get("opp_ap_rank")) and opp_data.get("ap_rank") is not None:
+                df.at[idx, "opp_ap_rank"] = opp_data["ap_rank"]
+
+            # Boxscore stats
+            if pd.isna(row.get("team_fgm")):
+                for stat in ("fgm", "fga", "3pm", "3pa", "ftm", "fta",
+                             "oreb", "dreb", "to"):
+                    df.at[idx, f"team_{stat}"] = team_data.get(stat)
+                    df.at[idx, f"opp_{stat}"] = opp_data.get(stat)
+
+    filled = df["team_fgm"].notna().sum()
+    print(f"  [{_now_str()}] Backfill done: {filled}/{len(df)} rows "
+          f"have boxscore data.")
+    return df
+
+
+def backfill_ap_ranks(
+    df: pd.DataFrame,
+    tracked_ids: set[str],
+    id_to_name: dict[str, str],
+) -> pd.DataFrame:
+    """Re-scan historical scoreboards to fill in opp_ap_rank for all games."""
+    missing_dates = sorted(df[df["opp_ap_rank"].isna()]["date"].unique())
+    if not missing_dates:
+        print(f"  [{_now_str()}] All rows already have AP rank data.")
+        return df
+
+    print(f"  [{_now_str()}] Backfilling AP ranks for "
+          f"{len(missing_dates)} dates ...")
+
+    # Build a lookup: (event_id, competitor_id) -> ap_rank
+    rank_lookup: dict[tuple[str, str], int | None] = {}
+
+    for i, date_str in enumerate(missing_dates, 1):
+        if i % 20 == 0:
+            print(f"  [{_now_str()}] Progress: {i}/{len(missing_dates)} dates")
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        events = fetch_scoreboard(dt)
+        for ev in events:
+            event_id = ev.get("id", "")
+            comps = ev.get("competitions", [])
+            if not comps:
+                continue
+            for c in comps[0].get("competitors", []):
+                cid = str(c.get("id", c.get("team", {}).get("id", "")))
+                rank = _extract_ap_rank(c)
+                rank_lookup[(event_id, cid)] = rank
+
+    # Apply ranks to dataframe
+    filled = 0
+    for idx in df[df["opp_ap_rank"].isna()].index:
+        row = df.loc[idx]
+        opp_id = str(row.get("opponent_id", ""))
+        eid = row["event_id"]
+        rank = rank_lookup.get((eid, opp_id))
+        if rank is not None:
+            df.at[idx, "opp_ap_rank"] = rank
+            filled += 1
+
+    total_ranked = df["opp_ap_rank"].notna().sum()
+    print(f"  [{_now_str()}] AP rank backfill done: "
+          f"{filled} new ranks filled, {total_ranked}/{len(df)} total.")
+    return df
 
 
 def phase1_fetch_games(
@@ -472,7 +719,7 @@ def phase1_fetch_games(
         print(f"  [{_now_str()}] ({i}/{len(dates_to_fetch)}) "
               f"{date_str}: {len(day_games)} new rows")
 
-        backfill_half_scores(day_games, team_ids)
+        backfill_game_details(day_games, team_ids)
 
         all_new_rows.extend(day_games)
         new_dates.add(date_str)
@@ -633,6 +880,20 @@ def phase2_fetch_odds(df: pd.DataFrame, new_dates: set[str]) -> pd.DataFrame:
 # PHASE 3 — Compute PIT stats (pure math, no API calls)
 # ═══════════════════════════════════════════════════════════════════════════
 
+# Keys used to write new PIT stats into team_records / opp_records dicts
+_NEW_PIT_KEYS = [
+    "ftm_pg", "fta_pg", "ft_pct",
+    "3pm_pg", "3pa_pg", "3pt_pct",
+    "2pm_pg", "2pa_pg", "2pt_pct",
+    "def_ftm_pg", "def_fta_pg", "def_ft_pct",
+    "def_3pm_pg", "def_3pa_pg", "def_3pt_pct",
+    "def_2pm_pg", "def_2pa_pg", "def_2pt_pct",
+    "oreb_pg", "dreb_pg",
+    "to_pg", "forced_to_pg",
+    "pace", "sos",
+]
+
+
 def phase3_compute_pit(
     df: pd.DataFrame, team_ids: dict[str, str],
 ) -> pd.DataFrame:
@@ -654,7 +915,7 @@ def phase3_compute_pit(
             pit[team_name] = {}
             continue
 
-        # Running counters
+        # Running counters — existing
         ow, ol = 0, 0
         hw, hl = 0, 0
         nw, nl = 0, 0
@@ -670,13 +931,28 @@ def phase3_compute_pit(
         np_, ng = 0, 0      # neutral
         ap, ag = 0, 0      # away
 
+        # Running counters — new (boxscore)
+        s_fgm, s_fga = 0, 0   # team shooting
+        s_3pm, s_3pa = 0, 0
+        s_ftm, s_fta = 0, 0
+        s_oreb, s_dreb = 0, 0
+        s_to = 0
+
+        d_fgm, d_fga = 0, 0   # defensive (opponent's numbers in game)
+        d_3pm, d_3pa = 0, 0
+        d_ftm, d_fta = 0, 0
+        d_to = 0               # opponent TOs = forced TOs
+
+        sos_sum, sos_count = 0, 0
+        bg = 0  # games with boxscore data
+
         team_pit: dict[str, dict] = {}
 
         for _, row in team_rows.iterrows():
             eid = row["event_id"]
 
-            # SAVE stats as-of BEFORE this game
-            team_pit[eid] = {
+            # ── SAVE stats as-of BEFORE this game ──
+            entry: dict = {
                 "record": f"{ow}-{ol}",
                 "home_record": f"{hw}-{hl}",
                 "neutral_record": f"{nw}-{nl}",
@@ -691,7 +967,56 @@ def phase3_compute_pit(
                 "away_ppg": round(ap / ag, 1) if ag else "",
             }
 
-            # UPDATE counters with this game
+            # New PIT stats (need at least 1 prior game with boxscore)
+            if bg > 0:
+                # Offensive shooting per game
+                entry["ftm_pg"] = round(s_ftm / bg, 1)
+                entry["fta_pg"] = round(s_fta / bg, 1)
+                entry["ft_pct"] = round(s_ftm / s_fta * 100, 1) if s_fta else ""
+                entry["3pm_pg"] = round(s_3pm / bg, 1)
+                entry["3pa_pg"] = round(s_3pa / bg, 1)
+                entry["3pt_pct"] = round(s_3pm / s_3pa * 100, 1) if s_3pa else ""
+                s_2pm = s_fgm - s_3pm
+                s_2pa = s_fga - s_3pa
+                entry["2pm_pg"] = round(s_2pm / bg, 1)
+                entry["2pa_pg"] = round(s_2pa / bg, 1)
+                entry["2pt_pct"] = round(s_2pm / s_2pa * 100, 1) if s_2pa else ""
+
+                # Defensive shooting allowed per game
+                entry["def_ftm_pg"] = round(d_ftm / bg, 1)
+                entry["def_fta_pg"] = round(d_fta / bg, 1)
+                entry["def_ft_pct"] = round(d_ftm / d_fta * 100, 1) if d_fta else ""
+                entry["def_3pm_pg"] = round(d_3pm / bg, 1)
+                entry["def_3pa_pg"] = round(d_3pa / bg, 1)
+                entry["def_3pt_pct"] = round(d_3pm / d_3pa * 100, 1) if d_3pa else ""
+                d_2pm = d_fgm - d_3pm
+                d_2pa = d_fga - d_3pa
+                entry["def_2pm_pg"] = round(d_2pm / bg, 1)
+                entry["def_2pa_pg"] = round(d_2pa / bg, 1)
+                entry["def_2pt_pct"] = round(d_2pm / d_2pa * 100, 1) if d_2pa else ""
+
+                # Rebounding
+                entry["oreb_pg"] = round(s_oreb / bg, 1)
+                entry["dreb_pg"] = round(s_dreb / bg, 1)
+
+                # Turnovers
+                entry["to_pg"] = round(s_to / bg, 1)
+                entry["forced_to_pg"] = round(d_to / bg, 1)
+
+                # Pace (possessions per game)
+                poss = s_fga - s_oreb + s_to + 0.475 * s_fta
+                entry["pace"] = round(poss / bg, 1)
+            else:
+                for k in _NEW_PIT_KEYS:
+                    if k != "sos":
+                        entry[k] = ""
+
+            # SOS (uses all games, not just boxscore games)
+            entry["sos"] = round(sos_sum / sos_count, 1) if sos_count else ""
+
+            team_pit[eid] = entry
+
+            # ── UPDATE counters with this game ──
             w = row["win_loss"] == "W"
             ha = row["home_away"]
             score = int(row["team_score"])
@@ -730,6 +1055,34 @@ def phase3_compute_pit(
                     elif ha == "neutral": ats_np += 1
                     else: ats_ap += 1
 
+            # Boxscore counters (only if data exists)
+            if pd.notna(row.get("team_fgm")):
+                bg += 1
+                s_fgm += _safe_acc(row["team_fgm"])
+                s_fga += _safe_acc(row["team_fga"])
+                s_3pm += _safe_acc(row["team_3pm"])
+                s_3pa += _safe_acc(row["team_3pa"])
+                s_ftm += _safe_acc(row["team_ftm"])
+                s_fta += _safe_acc(row["team_fta"])
+                s_oreb += _safe_acc(row["team_oreb"])
+                s_dreb += _safe_acc(row["team_dreb"])
+                s_to += _safe_acc(row["team_to"])
+                d_fgm += _safe_acc(row["opp_fgm"])
+                d_fga += _safe_acc(row["opp_fga"])
+                d_3pm += _safe_acc(row["opp_3pm"])
+                d_3pa += _safe_acc(row["opp_3pa"])
+                d_ftm += _safe_acc(row["opp_ftm"])
+                d_fta += _safe_acc(row["opp_fta"])
+                d_to += _safe_acc(row["opp_to"])
+
+            # SOS counter (every game counts; unranked = 100)
+            opp_rank = row.get("opp_ap_rank")
+            if pd.notna(opp_rank):
+                sos_sum += int(opp_rank)
+            else:
+                sos_sum += 100
+            sos_count += 1
+
         pit[team_name] = team_pit
 
     # -- Write PIT columns back to df --
@@ -741,7 +1094,7 @@ def phase3_compute_pit(
         eid = row["event_id"]
 
         t = pit.get(team, {}).get(eid, {})
-        team_records.append({
+        team_dict = {
             "team_record": t.get("record", "0-0"),
             "team_home_record": t.get("home_record", "0-0"),
             "team_neutral_record": t.get("neutral_record", "0-0"),
@@ -754,14 +1107,18 @@ def phase3_compute_pit(
             "team_home_ppg": t.get("home_ppg", ""),
             "team_neutral_ppg": t.get("neutral_ppg", ""),
             "team_away_ppg": t.get("away_ppg", ""),
-        })
+        }
+        # New team PIT columns
+        for k in _NEW_PIT_KEYS:
+            team_dict[f"team_{k}"] = t.get(k, "")
+        team_records.append(team_dict)
 
         # Opponent PIT (only if opponent is one of our 68 teams)
         opp_id = str(row.get("opponent_id", ""))
         opp_canonical = id_to_name.get(opp_id)
         if opp_canonical and opp_canonical in pit:
             o = pit[opp_canonical].get(eid, {})
-            opp_records.append({
+            opp_dict = {
                 "opp_record": o.get("record", "0-0"),
                 "opp_home_record": o.get("home_record", "0-0"),
                 "opp_neutral_record": o.get("neutral_record", "0-0"),
@@ -774,9 +1131,14 @@ def phase3_compute_pit(
                 "opp_home_ppg": o.get("home_ppg", ""),
                 "opp_neutral_ppg": o.get("neutral_ppg", ""),
                 "opp_away_ppg": o.get("away_ppg", ""),
-            })
+            }
+            for k in _NEW_PIT_KEYS:
+                opp_dict[f"opp_{k}"] = o.get(k, "")
+            opp_records.append(opp_dict)
         else:
-            opp_records.append({col: "" for col in PIT_COLUMNS if col.startswith("opp_")})
+            opp_records.append(
+                {col: "" for col in PIT_COLUMNS if col.startswith("opp_")}
+            )
 
     team_pit_df = pd.DataFrame(team_records, index=df.index)
     opp_pit_df = pd.DataFrame(opp_records, index=df.index)
@@ -807,6 +1169,7 @@ CSV_COLUMNS = {
     "closing_fg_ml": "Closing_FG_ML",
     "opening_fg_spread": "Opening_FG_Spread",
     "closing_fg_spread": "Closing_FG_Spread",
+    # Record
     "team_record": "Team_Record",
     "team_home_record": "Team_Home_Record",
     "team_neutral_record": "Team_Neutral_Record",
@@ -815,6 +1178,7 @@ CSV_COLUMNS = {
     "opp_home_record": "Opp_Home_Record",
     "opp_neutral_record": "Opp_Neutral_Record",
     "opp_away_record": "Opp_Away_Record",
+    # ATS
     "team_ats": "Team_ATS",
     "team_home_ats": "Team_Home_ATS",
     "team_neutral_ats": "Team_Neutral_ATS",
@@ -823,6 +1187,7 @@ CSV_COLUMNS = {
     "opp_home_ats": "Opp_Home_ATS",
     "opp_neutral_ats": "Opp_Neutral_ATS",
     "opp_away_ats": "Opp_Away_ATS",
+    # PPG
     "team_ppg": "Team_PPG",
     "team_home_ppg": "Team_Home_PPG",
     "team_neutral_ppg": "Team_Neutral_PPG",
@@ -831,6 +1196,64 @@ CSV_COLUMNS = {
     "opp_home_ppg": "Opp_Home_PPG",
     "opp_neutral_ppg": "Opp_Neutral_PPG",
     "opp_away_ppg": "Opp_Away_PPG",
+    # Team offensive shooting
+    "team_ftm_pg": "Team_FTM_PG",
+    "team_fta_pg": "Team_FTA_PG",
+    "team_ft_pct": "Team_FT_Pct",
+    "team_3pm_pg": "Team_3PM_PG",
+    "team_3pa_pg": "Team_3PA_PG",
+    "team_3pt_pct": "Team_3PT_Pct",
+    "team_2pm_pg": "Team_2PM_PG",
+    "team_2pa_pg": "Team_2PA_PG",
+    "team_2pt_pct": "Team_2PT_Pct",
+    # Team defensive shooting allowed
+    "team_def_ftm_pg": "Team_Def_FTM_PG",
+    "team_def_fta_pg": "Team_Def_FTA_PG",
+    "team_def_ft_pct": "Team_Def_FT_Pct",
+    "team_def_3pm_pg": "Team_Def_3PM_PG",
+    "team_def_3pa_pg": "Team_Def_3PA_PG",
+    "team_def_3pt_pct": "Team_Def_3PT_Pct",
+    "team_def_2pm_pg": "Team_Def_2PM_PG",
+    "team_def_2pa_pg": "Team_Def_2PA_PG",
+    "team_def_2pt_pct": "Team_Def_2PT_Pct",
+    # Team rebounding & turnovers
+    "team_oreb_pg": "Team_OREB_PG",
+    "team_dreb_pg": "Team_DREB_PG",
+    "team_to_pg": "Team_TO_PG",
+    "team_forced_to_pg": "Team_Forced_TO_PG",
+    # Team pace & SOS
+    "team_pace": "Team_Pace",
+    "team_sos": "Team_SOS",
+    # Opponent offensive shooting
+    "opp_ftm_pg": "Opp_FTM_PG",
+    "opp_fta_pg": "Opp_FTA_PG",
+    "opp_ft_pct": "Opp_FT_Pct",
+    "opp_3pm_pg": "Opp_3PM_PG",
+    "opp_3pa_pg": "Opp_3PA_PG",
+    "opp_3pt_pct": "Opp_3PT_Pct",
+    "opp_2pm_pg": "Opp_2PM_PG",
+    "opp_2pa_pg": "Opp_2PA_PG",
+    "opp_2pt_pct": "Opp_2PT_Pct",
+    # Opponent defensive shooting allowed
+    "opp_def_ftm_pg": "Opp_Def_FTM_PG",
+    "opp_def_fta_pg": "Opp_Def_FTA_PG",
+    "opp_def_ft_pct": "Opp_Def_FT_Pct",
+    "opp_def_3pm_pg": "Opp_Def_3PM_PG",
+    "opp_def_3pa_pg": "Opp_Def_3PA_PG",
+    "opp_def_3pt_pct": "Opp_Def_3PT_Pct",
+    "opp_def_2pm_pg": "Opp_Def_2PM_PG",
+    "opp_def_2pa_pg": "Opp_Def_2PA_PG",
+    "opp_def_2pt_pct": "Opp_Def_2PT_Pct",
+    # Opponent rebounding & turnovers
+    "opp_oreb_pg": "Opp_OREB_PG",
+    "opp_dreb_pg": "Opp_DREB_PG",
+    "opp_to_pg": "Opp_TO_PG",
+    "opp_forced_to_pg": "Opp_Forced_TO_PG",
+    # Opponent pace & SOS
+    "opp_pace": "Opp_Pace",
+    "opp_sos": "Opp_SOS",
+    # Opponent AP rank (raw per-game)
+    "opp_ap_rank": "Opp_AP_Rank",
 }
 
 
@@ -853,6 +1276,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backfill-odds", action="store_true",
                         help="Fetch odds for ALL dates with missing odds data")
+    parser.add_argument("--backfill-boxscore", action="store_true",
+                        help="Fetch boxscore stats for existing games missing them")
+    parser.add_argument("--backfill-ranks", action="store_true",
+                        help="Re-scan scoreboards to fill AP ranks for all games")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -881,6 +1308,16 @@ def main():
     else:
         df = phase2_fetch_odds(df, new_dates)
 
+    # Backfill boxscore stats for existing games
+    if args.backfill_boxscore:
+        print(f"[{_now_str()}] Backfilling boxscore data ...")
+        df = backfill_boxscore_data(df, team_ids)
+
+    # Backfill AP ranks from scoreboards
+    if args.backfill_ranks:
+        print(f"[{_now_str()}] Backfilling AP ranks ...")
+        df = backfill_ap_ranks(df, tracked_ids, id_to_name)
+
     # Save after API phases (in case Phase 3/4 crash, data is safe)
     save_game_logs(df)
 
@@ -894,9 +1331,11 @@ def main():
     save_game_logs(df)
 
     spread_count = df["closing_fg_spread"].notna().sum()
+    boxscore_count = df["team_fgm"].notna().sum()
     print(f"\n{'=' * 60}")
     print(f"  DONE! {len(df)} total rows, {df['team'].nunique()} teams")
-    print(f"  Rows with spreads: {spread_count}/{len(df)}")
+    print(f"  Rows with spreads:  {spread_count}/{len(df)}")
+    print(f"  Rows with boxscore: {boxscore_count}/{len(df)}")
     print(f"  Parquet: {PARQUET_FILE}")
     print(f"  CSV:     {CSV_FILE}")
     print(f"{'=' * 60}")
