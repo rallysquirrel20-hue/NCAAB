@@ -6,7 +6,7 @@ Four-phase incremental pipeline:
 
   Phase 1 -- Fetch new games      (ESPN scoreboard, 1 API call / date)
              + boxscore stats     (ESPN summary, 1 API call / event)
-  Phase 2 -- Fetch odds           (The Odds API, 2 calls / NEW date only)
+  Phase 2 -- Fetch odds           (The Odds API, 1 call / NEW date only)
   Phase 3 -- Compute PIT stats    (pure math, zero API calls)
   Phase 4 -- Export CSV           (write final output)
 
@@ -52,6 +52,7 @@ THE_ODDS_API_KEY = os.getenv("THE_ODDS_API_KEY")
 
 PARQUET_FILE = SCRIPT_DIR / "ncaab_game_logs.parquet"
 TEAM_IDS_CACHE = SCRIPT_DIR / "espn_team_ids.json"
+TEAM_NAME_MAP_FILE = SCRIPT_DIR / "team_name_map.json"
 CSV_FILE = SCRIPT_DIR / "ncaab_game_logs.csv"
 
 SEASON_START = datetime(2025, 11, 3)
@@ -213,7 +214,7 @@ def get_team_ids() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 RAW_COLUMNS = [
-    "team", "date", "event_id",
+    "team", "date", "event_id", "commence_time_utc",
     "opponent", "opponent_short", "opponent_id",
     "home_away", "neutral_site", "conference_game",
     "team_score", "opp_score", "win_loss",
@@ -225,6 +226,8 @@ RAW_COLUMNS = [
     "opp_oreb", "opp_dreb", "opp_to",
     # Opponent AP rank at game time
     "opp_ap_rank",
+    # Tracking flag
+    "is_tracked",
 ]
 
 ODDS_COLUMNS = [
@@ -233,12 +236,24 @@ ODDS_COLUMNS = [
 ]
 
 PIT_COLUMNS = [
-    # Record
-    "team_record", "team_home_record", "team_neutral_record", "team_away_record",
-    "opp_record", "opp_home_record", "opp_neutral_record", "opp_away_record",
-    # ATS
-    "team_ats", "team_home_ats", "team_neutral_ats", "team_away_ats",
-    "opp_ats", "opp_home_ats", "opp_neutral_ats", "opp_away_ats",
+    # Record (games + win pct)
+    "team_games", "team_win_pct",
+    "team_home_games", "team_home_win_pct",
+    "team_neutral_games", "team_neutral_win_pct",
+    "team_away_games", "team_away_win_pct",
+    "opp_games", "opp_win_pct",
+    "opp_home_games", "opp_home_win_pct",
+    "opp_neutral_games", "opp_neutral_win_pct",
+    "opp_away_games", "opp_away_win_pct",
+    # ATS (games + win pct)
+    "team_ats_games", "team_ats_win_pct",
+    "team_home_ats_games", "team_home_ats_win_pct",
+    "team_neutral_ats_games", "team_neutral_ats_win_pct",
+    "team_away_ats_games", "team_away_ats_win_pct",
+    "opp_ats_games", "opp_ats_win_pct",
+    "opp_home_ats_games", "opp_home_ats_win_pct",
+    "opp_neutral_ats_games", "opp_neutral_ats_win_pct",
+    "opp_away_ats_games", "opp_away_ats_win_pct",
     # PPG
     "team_ppg", "team_home_ppg", "team_neutral_ppg", "team_away_ppg",
     "opp_ppg", "opp_home_ppg", "opp_neutral_ppg", "opp_away_ppg",
@@ -288,6 +303,13 @@ def save_game_logs(df: pd.DataFrame) -> None:
         "opp_fgm", "opp_fga", "opp_3pm", "opp_3pa",
         "opp_ftm", "opp_fta", "opp_oreb", "opp_dreb", "opp_to",
         "opp_ap_rank",
+        # PIT game counts
+        "team_games", "team_home_games", "team_neutral_games", "team_away_games",
+        "opp_games", "opp_home_games", "opp_neutral_games", "opp_away_games",
+        "team_ats_games", "team_home_ats_games",
+        "team_neutral_ats_games", "team_away_ats_games",
+        "opp_ats_games", "opp_home_ats_games",
+        "opp_neutral_ats_games", "opp_away_ats_games",
     ]
     for col in int_cols:
         if col in df.columns:
@@ -297,6 +319,11 @@ def save_game_logs(df: pd.DataFrame) -> None:
     for col in ALL_COLUMNS:
         if col not in df.columns:
             df[col] = None
+
+    # Drop orphaned columns not in ALL_COLUMNS
+    orphans = [c for c in df.columns if c not in ALL_COLUMNS]
+    if orphans:
+        df.drop(columns=orphans, inplace=True)
 
     # Numeric PIT columns: coerce to float for pyarrow
     numeric_pit = [c for c in PIT_COLUMNS
@@ -433,6 +460,7 @@ def parse_scoreboard(
                 "team": canonical,
                 "date": game_date,
                 "event_id": event_id,
+                "commence_time_utc": date_raw,
                 "opponent": opp_c["display_name"],
                 "opponent_short": opp_c["short_name"],
                 "opponent_id": opp_c["id"],
@@ -445,6 +473,7 @@ def parse_scoreboard(
                 "team_1h": team_c["first_half"],
                 "opp_1h": opp_c["first_half"],
                 "opp_ap_rank": opp_c["ap_rank"],
+                "is_tracked": True,
             })
 
     return rows
@@ -667,6 +696,299 @@ def backfill_ap_ranks(
     return df
 
 
+def backfill_commence_times(df: pd.DataFrame) -> pd.DataFrame:
+    """Backfill commence_time_utc from ESPN scoreboard for existing rows."""
+    if "commence_time_utc" not in df.columns:
+        df["commence_time_utc"] = None
+
+    missing = df[df["commence_time_utc"].isna() | (df["commence_time_utc"] == "")]
+    if missing.empty:
+        print(f"  [{_now_str()}] All rows already have commence times.")
+        return df
+
+    # Group by date to minimize API calls (one scoreboard call per date)
+    missing_dates = sorted(missing["date"].unique())
+    print(f"  [{_now_str()}] Backfilling commence times for "
+          f"{len(missing_dates)} dates ({len(missing)} rows) ...")
+
+    # Build lookup: event_id -> commence_time_utc
+    time_lookup: dict[str, str] = {}
+    for i, date_str in enumerate(missing_dates, 1):
+        if i % 20 == 0:
+            print(f"  [{_now_str()}] Progress: {i}/{len(missing_dates)} dates")
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        events = fetch_scoreboard(dt)
+        for ev in events:
+            event_id = ev.get("id", "")
+            comps = ev.get("competitions", [])
+            if not comps:
+                continue
+            date_raw = comps[0].get("date", "")
+            if event_id and date_raw:
+                time_lookup[event_id] = date_raw
+
+    filled = 0
+    for idx in missing.index:
+        eid = df.at[idx, "event_id"]
+        ct = time_lookup.get(str(eid))
+        if ct:
+            df.at[idx, "commence_time_utc"] = ct
+            filled += 1
+
+    print(f"  [{_now_str()}] Commence time backfill done: "
+          f"{filled}/{len(missing)} rows filled.")
+    return df
+
+
+def create_mirror_rows(
+    df: pd.DataFrame,
+    tracked_ids: set[str],
+    team_ids: dict[str, str],
+) -> pd.DataFrame:
+    """Create mirror rows for games where a tournament team played a non-tournament opponent.
+
+    For each such game, creates a row from the opponent's perspective by swapping
+    team/opp columns.  Mirror rows have is_tracked = False.
+    """
+    mirror_rows: list[dict] = []
+    existing_keys: set[tuple[str, str]] = set(zip(df["team"], df["event_id"]))
+
+    for _, row in df.iterrows():
+        opp_id = str(row.get("opponent_id", ""))
+        if opp_id in tracked_ids:
+            continue  # opponent is tracked; they already have their own row
+
+        opp_display = row["opponent"]
+        eid = row["event_id"]
+        if (opp_display, eid) in existing_keys:
+            continue  # mirror already exists
+
+        # Determine home_away for mirror
+        orig_ha = row["home_away"]
+        if orig_ha == "home":
+            mirror_ha = "away"
+        elif orig_ha == "away":
+            mirror_ha = "home"
+        else:
+            mirror_ha = "neutral"
+
+        mirror_wl = "L" if row["win_loss"] == "W" else (
+            "W" if row["win_loss"] == "L" else "T")
+
+        # Look up the tournament team's ESPN ID for opponent_id in mirror
+        team_espn_id = team_ids.get(row["team"], "")
+
+        mirror = {
+            "team": opp_display,
+            "date": row["date"],
+            "event_id": eid,
+            "commence_time_utc": row.get("commence_time_utc"),
+            "opponent": row["team"],
+            "opponent_short": row["team"],
+            "opponent_id": team_espn_id,
+            "home_away": mirror_ha,
+            "neutral_site": row.get("neutral_site", False),
+            "conference_game": False,
+            "team_score": row["opp_score"],
+            "opp_score": row["team_score"],
+            "win_loss": mirror_wl,
+            "team_1h": row.get("opp_1h"),
+            "opp_1h": row.get("team_1h"),
+            "opp_ap_rank": None,  # tournament team's rank not tracked here
+            "is_tracked": False,
+            # Swap boxscore stats
+            "team_fgm": row.get("opp_fgm"), "team_fga": row.get("opp_fga"),
+            "team_3pm": row.get("opp_3pm"), "team_3pa": row.get("opp_3pa"),
+            "team_ftm": row.get("opp_ftm"), "team_fta": row.get("opp_fta"),
+            "team_oreb": row.get("opp_oreb"), "team_dreb": row.get("opp_dreb"),
+            "team_to": row.get("opp_to"),
+            "opp_fgm": row.get("team_fgm"), "opp_fga": row.get("team_fga"),
+            "opp_3pm": row.get("team_3pm"), "opp_3pa": row.get("team_3pa"),
+            "opp_ftm": row.get("team_ftm"), "opp_fta": row.get("team_fta"),
+            "opp_oreb": row.get("team_oreb"), "opp_dreb": row.get("team_dreb"),
+            "opp_to": row.get("team_to"),
+        }
+        mirror_rows.append(mirror)
+        existing_keys.add((opp_display, eid))
+
+    if not mirror_rows:
+        return df
+
+    mirror_df = pd.DataFrame(mirror_rows)
+    for col in ALL_COLUMNS:
+        if col not in mirror_df.columns:
+            mirror_df[col] = None
+
+    combined = pd.concat([df, mirror_df[ALL_COLUMNS]], ignore_index=True)
+    combined.sort_values(["date", "team"], inplace=True)
+    combined.reset_index(drop=True, inplace=True)
+    print(f"  [{_now_str()}] Created {len(mirror_rows)} mirror rows "
+          f"(total: {len(combined)})")
+    return combined
+
+
+def phase1_fetch_opponent_games(
+    df: pd.DataFrame,
+    team_ids: dict[str, str],
+    tracked_ids: set[str],
+) -> pd.DataFrame:
+    """Fetch full schedules for non-tournament opponents to fill in their game logs.
+
+    Only includes games where at least one team is a tournament team or a
+    known opponent (i.e., has played a tournament team).
+    """
+    # Collect all unique non-tournament opponent IDs
+    all_opp_ids: set[str] = set()
+    opp_id_to_name: dict[str, str] = {}
+    for _, row in df.iterrows():
+        opp_id = str(row.get("opponent_id", ""))
+        if opp_id and opp_id not in tracked_ids:
+            all_opp_ids.add(opp_id)
+            if opp_id not in opp_id_to_name:
+                opp_id_to_name[opp_id] = row["opponent"]
+
+    # Also include non-tracked teams that appear as "team" (from mirrors)
+    known_team_names: set[str] = set()
+    for _, row in df.iterrows():
+        if row.get("is_tracked") is False:
+            known_team_names.add(row["team"])
+
+    # Build set of known IDs (tracked + known opponents)
+    known_ids = tracked_ids | all_opp_ids
+
+    existing_keys: set[tuple[str, str]] = set(zip(df["team"], df["event_id"]))
+
+    if not all_opp_ids:
+        print(f"  [{_now_str()}] No non-tournament opponents to fetch.")
+        return df
+
+    print(f"[{_now_str()}] Fetching schedules for {len(all_opp_ids)} "
+          f"non-tournament opponents ...")
+
+    all_new_rows: list[dict] = []
+    events_fetched: set[str] = set()
+
+    for i, opp_id in enumerate(sorted(all_opp_ids), 1):
+        opp_name = opp_id_to_name.get(opp_id, f"Team-{opp_id}")
+        if i % 50 == 0:
+            print(f"  [{_now_str()}] Progress: {i}/{len(all_opp_ids)}")
+
+        url = f"{ESPN_BASE}/teams/{opp_id}/schedule"
+        data = api_get(url, params={"season": SEASON}, tag=f"schedule-{opp_id}")
+        if not data:
+            continue
+
+        for ev in data.get("events", []):
+            event_id = ev.get("id", "")
+            comps = ev.get("competitions", [])
+            if not comps:
+                continue
+            comp = comps[0]
+            if comp.get("status", {}).get("type", {}).get("name") != "STATUS_FINAL":
+                continue
+
+            # Skip if we already have this row
+            if (opp_name, event_id) in existing_keys:
+                continue
+
+            competitors = comp.get("competitors", [])
+            if len(competitors) != 2:
+                continue
+
+            # Find this opponent and the other team
+            opp_c = None
+            other_c = None
+            for c in competitors:
+                cid = str(c.get("id", c.get("team", {}).get("id", "")))
+                if cid == opp_id:
+                    opp_c = c
+                else:
+                    other_c = c
+            if not opp_c or not other_c:
+                continue
+
+            other_id = str(other_c.get("id", other_c.get("team", {}).get("id", "")))
+
+            # Skip if neither team is known
+            if other_id not in known_ids:
+                continue
+
+            neutral_site = comp.get("neutralSite", False)
+            date_raw = comp.get("date", "")
+            game_date = ""
+            if date_raw:
+                try:
+                    dt = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
+                    game_date = dt.strftime("%Y-%m-%d")
+                except ValueError:
+                    game_date = date_raw[:10]
+
+            opp_score_val = _extract_score(opp_c)
+            other_score_val = _extract_score(other_c)
+            opp_ha_raw = opp_c.get("homeAway", "")
+            ha = "neutral" if neutral_site else opp_ha_raw
+            wl = ("W" if opp_score_val > other_score_val
+                  else ("L" if opp_score_val < other_score_val else "T"))
+
+            other_team_info = other_c.get("team", {})
+            other_display = other_team_info.get("displayName", "")
+            other_short = other_team_info.get(
+                "shortDisplayName", other_team_info.get("displayName", ""))
+
+            row_dict = {
+                "team": opp_name,
+                "date": game_date,
+                "event_id": event_id,
+                "commence_time_utc": date_raw,
+                "opponent": other_display,
+                "opponent_short": other_short,
+                "opponent_id": other_id,
+                "home_away": ha,
+                "neutral_site": neutral_site,
+                "conference_game": False,
+                "team_score": opp_score_val,
+                "opp_score": other_score_val,
+                "win_loss": wl,
+                "team_1h": None,
+                "opp_1h": None,
+                "opp_ap_rank": None,
+                "is_tracked": False,
+            }
+
+            # Fetch boxscore if not already fetched for this event
+            if event_id not in events_fetched:
+                summary = fetch_game_summary(event_id)
+                events_fetched.add(event_id)
+                if summary:
+                    team_data = summary.get(opp_id, {})
+                    other_data = summary.get(other_id, {})
+                    row_dict["team_1h"] = team_data.get("1h")
+                    row_dict["opp_1h"] = other_data.get("1h")
+                    for stat in ("fgm", "fga", "3pm", "3pa", "ftm", "fta",
+                                 "oreb", "dreb", "to"):
+                        row_dict[f"team_{stat}"] = team_data.get(stat)
+                        row_dict[f"opp_{stat}"] = other_data.get(stat)
+
+            all_new_rows.append(row_dict)
+            existing_keys.add((opp_name, event_id))
+
+    if not all_new_rows:
+        print(f"  [{_now_str()}] No new opponent games found.")
+        return df
+
+    new_df = pd.DataFrame(all_new_rows)
+    for col in ALL_COLUMNS:
+        if col not in new_df.columns:
+            new_df[col] = None
+
+    combined = pd.concat([df, new_df[ALL_COLUMNS]], ignore_index=True)
+    combined.sort_values(["date", "team"], inplace=True)
+    combined.reset_index(drop=True, inplace=True)
+    print(f"  [{_now_str()}] Opponent games: +{len(all_new_rows)} rows "
+          f"(total: {len(combined)})")
+    return combined
+
+
 def phase1_fetch_games(
     df: pd.DataFrame,
     team_ids: dict[str, str],
@@ -749,46 +1071,50 @@ def phase1_fetch_games(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def fetch_daily_odds(date_str: str) -> dict:
+    """Fetch a single odds snapshot for a game date.
+
+    ESPN dates games in ET, but evening-ET games have UTC commence times
+    that fall on the next calendar day.  A single snapshot from the
+    previous day at ~5 PM ET reliably captures lines for all games.
+    """
     dt = datetime.strptime(date_str, "%Y-%m-%d")
     offset_h = 5 if (dt.month >= 11 or dt.month <= 2) else 4
+    prev_day = dt - timedelta(days=1)
+    snap_dt = prev_day + timedelta(hours=17 + offset_h)
 
-    open_iso = dt.replace(
-        hour=10 + offset_h, minute=0, second=0,
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    close_iso = dt.replace(
-        hour=17 + offset_h, minute=0, second=0,
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    base_params = {
+    url = f"{ODDS_BASE}/v4/historical/sports/basketball_ncaab/odds"
+    snap = api_get(url, params={
         "apiKey": THE_ODDS_API_KEY,
         "regions": "us",
         "markets": "h2h,spreads",
         "oddsFormat": "american",
-    }
-    url = f"{ODDS_BASE}/v4/historical/sports/basketball_ncaab/odds"
+        "date": snap_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }, tag=f"odds-{date_str}")
+    return {"snap": snap}
 
-    fg_open = api_get(url, params={**base_params, "date": open_iso},
-                      tag=f"odds-open-{date_str}")
-    fg_close = api_get(url, params={**base_params, "date": close_iso},
-                       tag=f"odds-close-{date_str}")
-    return {"fg_open": fg_open, "fg_close": fg_close}
+
+def _load_team_name_map() -> dict[str, str]:
+    """Load the ESPN -> Odds API team name map."""
+    if TEAM_NAME_MAP_FILE.exists():
+        with open(TEAM_NAME_MAP_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+_TEAM_NAME_MAP: dict[str, str] = _load_team_name_map()
 
 
 def _find_team_in_odds(
-    snap: dict | None, odds_lower: str, opp_keywords: list[str],
+    snap: dict | None, team_odds_lower: str,
 ) -> dict | None:
+    """Find a game by team name. One game per team per day."""
     if not snap:
         return None
     for game in snap.get("data", []):
         home = game.get("home_team", "").lower()
         away = game.get("away_team", "").lower()
-        if odds_lower != home and odds_lower != away:
-            continue
-        if opp_keywords:
-            other = away if odds_lower == home else home
-            if not any(kw in other for kw in opp_keywords):
-                continue
-        return game
+        if team_odds_lower == home or team_odds_lower == away:
+            return game
     return None
 
 
@@ -806,6 +1132,126 @@ def _first_bookmaker_value(
     return None
 
 
+def fetch_odds_snapshot(timestamp_iso: str) -> dict | None:
+    """Fetch a single historical odds snapshot at the given ISO timestamp."""
+    url = f"{ODDS_BASE}/v4/historical/sports/basketball_ncaab/odds"
+    return api_get(url, params={
+        "apiKey": THE_ODDS_API_KEY,
+        "regions": "us",
+        "markets": "h2h,spreads",
+        "oddsFormat": "american",
+        "date": timestamp_iso,
+    }, tag=f"odds-snap-{timestamp_iso[:16]}")
+
+
+def phase2_backfill_odds(df: pd.DataFrame) -> pd.DataFrame:
+    """Backfill true opening and closing lines using per-game snapshots.
+
+    For each unique commence_time, fetches the snapshot at floor(commence_time)
+    for closing lines.  Opening lines come from the earliest snapshot where
+    each game first appeared.
+    """
+    if not THE_ODDS_API_KEY:
+        print(f"[{_now_str()}] Backfill odds: skipped (no Odds API key).")
+        return df
+
+    # Only rows with commence times
+    has_ct = df["commence_time_utc"].notna() & (df["commence_time_utc"] != "")
+    if not has_ct.any():
+        print(f"[{_now_str()}] Backfill odds: no commence times available.")
+        return df
+
+    # Compute floor(commence_time) for each game — truncate to hour
+    ct_series = pd.to_datetime(df.loc[has_ct, "commence_time_utc"], utc=True,
+                               errors="coerce")
+    floor_times = ct_series.dt.floor("h")
+
+    # Deduplicate snapshot times
+    unique_snaps = sorted(floor_times.dropna().unique())
+    print(f"[{_now_str()}] Backfill odds: {len(unique_snaps)} unique snapshot "
+          f"times to fetch ...")
+
+    # Fetch all snapshots chronologically
+    snapshots: dict[str, dict] = {}
+    for i, snap_time in enumerate(unique_snaps, 1):
+        snap_iso = pd.Timestamp(snap_time).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if i % 50 == 0:
+            print(f"  [{_now_str()}] Progress: {i}/{len(unique_snaps)} snapshots")
+        snap_data = fetch_odds_snapshot(snap_iso)
+        if snap_data:
+            snapshots[snap_iso] = snap_data
+
+    if not snapshots:
+        print(f"  [{_now_str()}] Backfill odds: no snapshots returned.")
+        return df
+
+    # Build opening index: (team_lower, commence_time) -> earliest_snapshot_iso
+    opening_index: dict[tuple[str, str], str] = {}
+    for snap_iso in sorted(snapshots.keys()):
+        snap_data = snapshots[snap_iso]
+        for game in snap_data.get("data", []):
+            ct = game.get("commence_time", "")
+            home = game.get("home_team", "").lower()
+            away = game.get("away_team", "").lower()
+            for team_lower in (home, away):
+                key = (team_lower, ct)
+                if key not in opening_index:
+                    opening_index[key] = snap_iso
+
+    # Assign lines to each row
+    filled = 0
+    for idx in df[has_ct].index:
+        row = df.loc[idx]
+        canonical = row["team"]
+        odds_name = _TEAM_NAME_MAP.get(canonical, "") or \
+                    ODDS_NAME_MAP.get(canonical, "")
+        if not odds_name:
+            continue
+        team_odds_lower = odds_name.lower()
+
+        ct_val = pd.to_datetime(row["commence_time_utc"], utc=True,
+                                errors="coerce")
+        if pd.isna(ct_val):
+            continue
+
+        floor_iso = ct_val.floor("h").strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Closing line: snapshot at floor(commence_time)
+        closing_snap = snapshots.get(floor_iso)
+        if closing_snap:
+            game = _find_team_in_odds(closing_snap, team_odds_lower)
+            if game:
+                bm = game.get("bookmakers", [])
+                df.at[idx, "closing_fg_ml"] = _first_bookmaker_value(
+                    bm, "h2h", team_odds_lower, "price")
+                df.at[idx, "closing_fg_spread"] = _first_bookmaker_value(
+                    bm, "spreads", team_odds_lower, "point")
+
+        # Opening line: earliest snapshot where this game appeared
+        ct_str = row["commence_time_utc"]
+        # Try to match against opening_index using the raw commence_time
+        open_snap_iso = opening_index.get((team_odds_lower, ct_str))
+        if not open_snap_iso:
+            # Try ISO-formatted version
+            ct_iso = ct_val.strftime("%Y-%m-%dT%H:%M:%SZ")
+            open_snap_iso = opening_index.get((team_odds_lower, ct_iso))
+        if open_snap_iso and open_snap_iso in snapshots:
+            open_snap = snapshots[open_snap_iso]
+            game = _find_team_in_odds(open_snap, team_odds_lower)
+            if game:
+                bm = game.get("bookmakers", [])
+                df.at[idx, "opening_fg_ml"] = _first_bookmaker_value(
+                    bm, "h2h", team_odds_lower, "price")
+                df.at[idx, "opening_fg_spread"] = _first_bookmaker_value(
+                    bm, "spreads", team_odds_lower, "point")
+                filled += 1
+
+    matched = df["closing_fg_spread"].notna().sum()
+    print(f"  [{_now_str()}] Backfill odds done: {matched}/{len(df)} rows "
+          f"have closing spreads, {filled} rows got opening lines.")
+    return df
+
+
 def extract_odds_for_game(
     odds_data: dict, canonical_name: str, opp_display_name: str,
 ) -> dict:
@@ -813,31 +1259,24 @@ def extract_odds_for_game(
         "opening_fg_ml": None, "closing_fg_ml": None,
         "opening_fg_spread": None, "closing_fg_spread": None,
     }
-    odds_name = ODDS_NAME_MAP.get(canonical_name, "")
+    odds_name = _TEAM_NAME_MAP.get(canonical_name, "") or \
+                ODDS_NAME_MAP.get(canonical_name, "")
     if not odds_name:
         return result
-    odds_lower = odds_name.lower()
+    team_odds_lower = odds_name.lower()
 
-    opp_keywords = (
-        [w.lower() for w in opp_display_name.split() if len(w) >= 3]
-        if opp_display_name else []
-    )
+    game = _find_team_in_odds(odds_data.get("snap"), team_odds_lower)
+    if not game:
+        return result
 
-    for snap_key, ml_col, spread_col in [
-        ("fg_open",  "opening_fg_ml",  "opening_fg_spread"),
-        ("fg_close", "closing_fg_ml",  "closing_fg_spread"),
-    ]:
-        game = _find_team_in_odds(
-            odds_data.get(snap_key), odds_lower, opp_keywords,
-        )
-        if not game:
-            continue
-        bookmakers = game.get("bookmakers", [])
-        result[ml_col] = _first_bookmaker_value(
-            bookmakers, "h2h", odds_lower, "price")
-        result[spread_col] = _first_bookmaker_value(
-            bookmakers, "spreads", odds_lower, "point")
-
+    bookmakers = game.get("bookmakers", [])
+    # Single snapshot → same values for opening and closing
+    ml = _first_bookmaker_value(bookmakers, "h2h", team_odds_lower, "price")
+    spread = _first_bookmaker_value(bookmakers, "spreads", team_odds_lower, "point")
+    result["opening_fg_ml"] = ml
+    result["closing_fg_ml"] = ml
+    result["opening_fg_spread"] = spread
+    result["closing_fg_spread"] = spread
     return result
 
 
@@ -853,7 +1292,7 @@ def phase2_fetch_odds(df: pd.DataFrame, new_dates: set[str]) -> pd.DataFrame:
 
     sorted_dates = sorted(new_dates)
     print(f"[{_now_str()}] Phase 2: fetching odds for {len(sorted_dates)} "
-          f"date(s) ({len(sorted_dates) * 2} API calls) ...")
+          f"date(s) ({len(sorted_dates) } API calls) ...")
 
     for i, date_str in enumerate(sorted_dates, 1):
         print(f"  [{_now_str()}] ({i}/{len(sorted_dates)}) {date_str}")
@@ -906,10 +1345,17 @@ def phase3_compute_pit(
 
     id_to_name = {tid: name for name, tid in team_ids.items()}
 
+    # Extend id_to_name with non-tournament opponents
+    for _, row in df.iterrows():
+        opp_id = str(row.get("opponent_id", ""))
+        if opp_id and opp_id not in id_to_name:
+            id_to_name[opp_id] = row["opponent"]
+
     # -- Pre-compute per-team PIT: {team -> {event_id -> stats_dict}} --
     pit: dict[str, dict[str, dict]] = {}
 
-    for team_name in TEAMS:
+    all_teams = list(df["team"].unique())
+    for team_name in all_teams:
         team_rows = df[df["team"] == team_name].sort_values("date")
         if team_rows.empty:
             pit[team_name] = {}
@@ -953,14 +1399,22 @@ def phase3_compute_pit(
 
             # ── SAVE stats as-of BEFORE this game ──
             entry: dict = {
-                "record": f"{ow}-{ol}",
-                "home_record": f"{hw}-{hl}",
-                "neutral_record": f"{nw}-{nl}",
-                "away_record": f"{aw}-{al}",
-                "ats": f"{ats_ow}-{ats_ol}-{ats_op}",
-                "ats_home": f"{ats_hw}-{ats_hl}-{ats_hp}",
-                "ats_neutral": f"{ats_nw}-{ats_nl}-{ats_np}",
-                "ats_away": f"{ats_aw}-{ats_al}-{ats_ap}",
+                "games": ow + ol,
+                "win_pct": round(ow / (ow + ol), 3) if (ow + ol) else None,
+                "home_games": hw + hl,
+                "home_win_pct": round(hw / (hw + hl), 3) if (hw + hl) else None,
+                "neutral_games": nw + nl,
+                "neutral_win_pct": round(nw / (nw + nl), 3) if (nw + nl) else None,
+                "away_games": aw + al,
+                "away_win_pct": round(aw / (aw + al), 3) if (aw + al) else None,
+                "ats_games": ats_ow + ats_ol + ats_op,
+                "ats_win_pct": round(ats_ow / (ats_ow + ats_ol + ats_op), 3) if (ats_ow + ats_ol + ats_op) else None,
+                "ats_home_games": ats_hw + ats_hl + ats_hp,
+                "ats_home_win_pct": round(ats_hw / (ats_hw + ats_hl + ats_hp), 3) if (ats_hw + ats_hl + ats_hp) else None,
+                "ats_neutral_games": ats_nw + ats_nl + ats_np,
+                "ats_neutral_win_pct": round(ats_nw / (ats_nw + ats_nl + ats_np), 3) if (ats_nw + ats_nl + ats_np) else None,
+                "ats_away_games": ats_aw + ats_al + ats_ap,
+                "ats_away_win_pct": round(ats_aw / (ats_aw + ats_al + ats_ap), 3) if (ats_aw + ats_al + ats_ap) else None,
                 "ppg": round(tp / tg, 1) if tg else "",
                 "home_ppg": round(hp / hg, 1) if hg else "",
                 "neutral_ppg": round(np_ / ng, 1) if ng else "",
@@ -1095,14 +1549,22 @@ def phase3_compute_pit(
 
         t = pit.get(team, {}).get(eid, {})
         team_dict = {
-            "team_record": t.get("record", "0-0"),
-            "team_home_record": t.get("home_record", "0-0"),
-            "team_neutral_record": t.get("neutral_record", "0-0"),
-            "team_away_record": t.get("away_record", "0-0"),
-            "team_ats": t.get("ats", "0-0-0"),
-            "team_home_ats": t.get("ats_home", "0-0-0"),
-            "team_neutral_ats": t.get("ats_neutral", "0-0-0"),
-            "team_away_ats": t.get("ats_away", "0-0-0"),
+            "team_games": t.get("games", 0),
+            "team_win_pct": t.get("win_pct"),
+            "team_home_games": t.get("home_games", 0),
+            "team_home_win_pct": t.get("home_win_pct"),
+            "team_neutral_games": t.get("neutral_games", 0),
+            "team_neutral_win_pct": t.get("neutral_win_pct"),
+            "team_away_games": t.get("away_games", 0),
+            "team_away_win_pct": t.get("away_win_pct"),
+            "team_ats_games": t.get("ats_games", 0),
+            "team_ats_win_pct": t.get("ats_win_pct"),
+            "team_home_ats_games": t.get("ats_home_games", 0),
+            "team_home_ats_win_pct": t.get("ats_home_win_pct"),
+            "team_neutral_ats_games": t.get("ats_neutral_games", 0),
+            "team_neutral_ats_win_pct": t.get("ats_neutral_win_pct"),
+            "team_away_ats_games": t.get("ats_away_games", 0),
+            "team_away_ats_win_pct": t.get("ats_away_win_pct"),
             "team_ppg": t.get("ppg", ""),
             "team_home_ppg": t.get("home_ppg", ""),
             "team_neutral_ppg": t.get("neutral_ppg", ""),
@@ -1119,14 +1581,22 @@ def phase3_compute_pit(
         if opp_canonical and opp_canonical in pit:
             o = pit[opp_canonical].get(eid, {})
             opp_dict = {
-                "opp_record": o.get("record", "0-0"),
-                "opp_home_record": o.get("home_record", "0-0"),
-                "opp_neutral_record": o.get("neutral_record", "0-0"),
-                "opp_away_record": o.get("away_record", "0-0"),
-                "opp_ats": o.get("ats", "0-0-0"),
-                "opp_home_ats": o.get("ats_home", "0-0-0"),
-                "opp_neutral_ats": o.get("ats_neutral", "0-0-0"),
-                "opp_away_ats": o.get("ats_away", "0-0-0"),
+                "opp_games": o.get("games", 0),
+                "opp_win_pct": o.get("win_pct"),
+                "opp_home_games": o.get("home_games", 0),
+                "opp_home_win_pct": o.get("home_win_pct"),
+                "opp_neutral_games": o.get("neutral_games", 0),
+                "opp_neutral_win_pct": o.get("neutral_win_pct"),
+                "opp_away_games": o.get("away_games", 0),
+                "opp_away_win_pct": o.get("away_win_pct"),
+                "opp_ats_games": o.get("ats_games", 0),
+                "opp_ats_win_pct": o.get("ats_win_pct"),
+                "opp_home_ats_games": o.get("ats_home_games", 0),
+                "opp_home_ats_win_pct": o.get("ats_home_win_pct"),
+                "opp_neutral_ats_games": o.get("ats_neutral_games", 0),
+                "opp_neutral_ats_win_pct": o.get("ats_neutral_win_pct"),
+                "opp_away_ats_games": o.get("ats_away_games", 0),
+                "opp_away_ats_win_pct": o.get("ats_away_win_pct"),
                 "opp_ppg": o.get("ppg", ""),
                 "opp_home_ppg": o.get("home_ppg", ""),
                 "opp_neutral_ppg": o.get("neutral_ppg", ""),
@@ -1137,7 +1607,7 @@ def phase3_compute_pit(
             opp_records.append(opp_dict)
         else:
             opp_records.append(
-                {col: "" for col in PIT_COLUMNS if col.startswith("opp_")}
+                {col: None for col in PIT_COLUMNS if col.startswith("opp_")}
             )
 
     team_pit_df = pd.DataFrame(team_records, index=df.index)
@@ -1159,6 +1629,7 @@ def phase3_compute_pit(
 CSV_COLUMNS = {
     "team": "Team",
     "date": "Date",
+    "commence_time_utc": "Commence_Time_UTC",
     "opponent": "Opponent",
     "home_away": "Home_Away",
     "conference_game": "Conference_Game",
@@ -1169,24 +1640,40 @@ CSV_COLUMNS = {
     "closing_fg_ml": "Closing_FG_ML",
     "opening_fg_spread": "Opening_FG_Spread",
     "closing_fg_spread": "Closing_FG_Spread",
-    # Record
-    "team_record": "Team_Record",
-    "team_home_record": "Team_Home_Record",
-    "team_neutral_record": "Team_Neutral_Record",
-    "team_away_record": "Team_Away_Record",
-    "opp_record": "Opp_Record",
-    "opp_home_record": "Opp_Home_Record",
-    "opp_neutral_record": "Opp_Neutral_Record",
-    "opp_away_record": "Opp_Away_Record",
-    # ATS
-    "team_ats": "Team_ATS",
-    "team_home_ats": "Team_Home_ATS",
-    "team_neutral_ats": "Team_Neutral_ATS",
-    "team_away_ats": "Team_Away_ATS",
-    "opp_ats": "Opp_ATS",
-    "opp_home_ats": "Opp_Home_ATS",
-    "opp_neutral_ats": "Opp_Neutral_ATS",
-    "opp_away_ats": "Opp_Away_ATS",
+    # Record (games + win pct)
+    "team_games": "Team_Games",
+    "team_win_pct": "Team_Win_Pct",
+    "team_home_games": "Team_Home_Games",
+    "team_home_win_pct": "Team_Home_Win_Pct",
+    "team_neutral_games": "Team_Neutral_Games",
+    "team_neutral_win_pct": "Team_Neutral_Win_Pct",
+    "team_away_games": "Team_Away_Games",
+    "team_away_win_pct": "Team_Away_Win_Pct",
+    "opp_games": "Opp_Games",
+    "opp_win_pct": "Opp_Win_Pct",
+    "opp_home_games": "Opp_Home_Games",
+    "opp_home_win_pct": "Opp_Home_Win_Pct",
+    "opp_neutral_games": "Opp_Neutral_Games",
+    "opp_neutral_win_pct": "Opp_Neutral_Win_Pct",
+    "opp_away_games": "Opp_Away_Games",
+    "opp_away_win_pct": "Opp_Away_Win_Pct",
+    # ATS (games + win pct)
+    "team_ats_games": "Team_ATS_Games",
+    "team_ats_win_pct": "Team_ATS_Win_Pct",
+    "team_home_ats_games": "Team_Home_ATS_Games",
+    "team_home_ats_win_pct": "Team_Home_ATS_Win_Pct",
+    "team_neutral_ats_games": "Team_Neutral_ATS_Games",
+    "team_neutral_ats_win_pct": "Team_Neutral_ATS_Win_Pct",
+    "team_away_ats_games": "Team_Away_ATS_Games",
+    "team_away_ats_win_pct": "Team_Away_ATS_Win_Pct",
+    "opp_ats_games": "Opp_ATS_Games",
+    "opp_ats_win_pct": "Opp_ATS_Win_Pct",
+    "opp_home_ats_games": "Opp_Home_ATS_Games",
+    "opp_home_ats_win_pct": "Opp_Home_ATS_Win_Pct",
+    "opp_neutral_ats_games": "Opp_Neutral_ATS_Games",
+    "opp_neutral_ats_win_pct": "Opp_Neutral_ATS_Win_Pct",
+    "opp_away_ats_games": "Opp_Away_ATS_Games",
+    "opp_away_ats_win_pct": "Opp_Away_ATS_Win_Pct",
     # PPG
     "team_ppg": "Team_PPG",
     "team_home_ppg": "Team_Home_PPG",
@@ -1258,7 +1745,9 @@ CSV_COLUMNS = {
 
 
 def phase4_export_csv(df: pd.DataFrame) -> None:
-    export = df[list(CSV_COLUMNS.keys())].copy()
+    # Only export tournament team rows
+    tracked = df[df["is_tracked"] == True]  # noqa: E712
+    export = tracked[list(CSV_COLUMNS.keys())].copy()
     # Map conference_game bool -> Y/N
     export["conference_game"] = export["conference_game"].map(
         {True: "Y", False: "N", "Y": "Y", "N": "N"}).fillna("N")
@@ -1280,6 +1769,10 @@ def main():
                         help="Fetch boxscore stats for existing games missing them")
     parser.add_argument("--backfill-ranks", action="store_true",
                         help="Re-scan scoreboards to fill AP ranks for all games")
+    parser.add_argument("--backfill-times", action="store_true",
+                        help="Backfill commence_time_utc for all games")
+    parser.add_argument("--backfill-opponents", action="store_true",
+                        help="Fetch game logs for non-tournament opponents")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -1292,6 +1785,17 @@ def main():
     id_to_name = {tid: name for name, tid in team_ids.items()}
 
     df = load_game_logs()
+
+    # Ensure is_tracked is set for existing rows
+    if "is_tracked" not in df.columns:
+        df["is_tracked"] = None
+    if not df.empty:
+        # Rows with team name in TEAMS are tracked
+        tracked_names = set(TEAMS)
+        df.loc[df["is_tracked"].isna(), "is_tracked"] = (
+            df.loc[df["is_tracked"].isna(), "team"].isin(tracked_names)
+        )
+
     print(f"[{_now_str()}] Loaded {len(df)} existing rows.\n")
 
     # Phase 1: new games
@@ -1299,12 +1803,8 @@ def main():
 
     # Phase 2: odds
     if args.backfill_odds:
-        # Find all dates where at least one row has no closing spread
-        missing = df[df["closing_fg_spread"].isna()]["date"].unique()
-        odds_dates = set(missing)
-        print(f"[{_now_str()}] Backfill mode: {len(odds_dates)} dates "
-              f"with missing odds ({len(odds_dates) * 2} API calls)")
-        df = phase2_fetch_odds(df, odds_dates)
+        print(f"[{_now_str()}] Backfill mode: true opening/closing lines")
+        df = phase2_backfill_odds(df)
     else:
         df = phase2_fetch_odds(df, new_dates)
 
@@ -1318,6 +1818,19 @@ def main():
         print(f"[{_now_str()}] Backfilling AP ranks ...")
         df = backfill_ap_ranks(df, tracked_ids, id_to_name)
 
+    # Backfill commence times
+    if args.backfill_times:
+        print(f"[{_now_str()}] Backfilling commence times ...")
+        df = backfill_commence_times(df)
+
+    # Create mirror rows for non-tournament opponents
+    df = create_mirror_rows(df, tracked_ids, team_ids)
+
+    # Backfill opponent game logs
+    if args.backfill_opponents:
+        print(f"[{_now_str()}] Backfilling opponent game logs ...")
+        df = phase1_fetch_opponent_games(df, team_ids, tracked_ids)
+
     # Save after API phases (in case Phase 3/4 crash, data is safe)
     save_game_logs(df)
 
@@ -1330,12 +1843,16 @@ def main():
     # Save final with PIT columns
     save_game_logs(df)
 
-    spread_count = df["closing_fg_spread"].notna().sum()
+    tracked_df = df[df["is_tracked"] == True]  # noqa: E712
+    spread_count = tracked_df["closing_fg_spread"].notna().sum()
     boxscore_count = df["team_fgm"].notna().sum()
+    opp_pit_filled = tracked_df["opp_games"].notna().sum()
     print(f"\n{'=' * 60}")
-    print(f"  DONE! {len(df)} total rows, {df['team'].nunique()} teams")
-    print(f"  Rows with spreads:  {spread_count}/{len(df)}")
+    print(f"  DONE! {len(df)} total rows ({len(tracked_df)} tracked), "
+          f"{df['team'].nunique()} teams")
+    print(f"  Rows with spreads:  {spread_count}/{len(tracked_df)}")
     print(f"  Rows with boxscore: {boxscore_count}/{len(df)}")
+    print(f"  Opp PIT filled:     {opp_pit_filled}/{len(tracked_df)}")
     print(f"  Parquet: {PARQUET_FILE}")
     print(f"  CSV:     {CSV_FILE}")
     print(f"{'=' * 60}")
