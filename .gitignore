@@ -1,3 +1,4 @@
 .env
 __pycache__/
 ncaab_cache.json
+odds_cache/

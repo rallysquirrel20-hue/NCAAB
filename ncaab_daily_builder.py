@@ -54,6 +54,8 @@ PARQUET_FILE = SCRIPT_DIR / "ncaab_game_logs.parquet"
 TEAM_IDS_CACHE = SCRIPT_DIR / "espn_team_ids.json"
 TEAM_NAME_MAP_FILE = SCRIPT_DIR / "team_name_map.json"
 CSV_FILE = SCRIPT_DIR / "ncaab_game_logs.csv"
+ODDS_CACHE_DIR = SCRIPT_DIR / "odds_cache"
+ODDS_HISTORY_FILE = SCRIPT_DIR / "ncaab_odds_history.parquet"
 
 SEASON_START = datetime(2025, 11, 3)
 
@@ -87,13 +89,30 @@ def _safe_acc(val) -> int:
     return 0
 
 
+# Track Odds API credit usage across the run
+_odds_api_calls = 0
+_odds_api_credits_used = 0
+_odds_api_credits_remaining = None
+
+
 def api_get(url: str, params: dict | None = None, tag: str = "") -> dict | None:
     """GET with retries, backoff, and rate-limiting."""
+    global _odds_api_calls, _odds_api_credits_used, _odds_api_credits_remaining
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             resp = requests.get(url, params=params, timeout=30)
             if resp.status_code == 200:
-                _sleep()
+                # Track Odds API credit usage
+                if ODDS_BASE in url:
+                    _odds_api_calls += 1
+                    last_cost = resp.headers.get("x-requests-last")
+                    remaining = resp.headers.get("x-requests-remaining")
+                    if last_cost is not None:
+                        _odds_api_credits_used += int(last_cost)
+                    if remaining is not None:
+                        _odds_api_credits_remaining = int(remaining)
+                    _sleep()
                 return resp.json()
             if resp.status_code == 429:
                 wait = RETRY_BACKOFF ** attempt * 5
@@ -112,6 +131,14 @@ def api_get(url: str, params: dict | None = None, tag: str = "") -> dict | None:
                 continue
             return None
     return None
+
+
+def print_odds_api_usage():
+    """Print a summary of Odds API credit usage for this run."""
+    if _odds_api_calls > 0:
+        print(f"  Odds API: {_odds_api_calls} calls, "
+              f"{_odds_api_credits_used} credits used, "
+              f"{_odds_api_credits_remaining:,} remaining")
 
 
 # ---------------------------------------------------------------------------
@@ -226,8 +253,10 @@ RAW_COLUMNS = [
     "opp_oreb", "opp_dreb", "opp_to",
     # Opponent AP rank at game time
     "opp_ap_rank",
-    # Tracking flag
+    # Tracking flags
     "is_tracked",
+    "ap_rank_checked",
+    "odds_checked",
 ]
 
 ODDS_COLUMNS = [
@@ -593,19 +622,29 @@ def backfill_game_details(
 def backfill_boxscore_data(
     df: pd.DataFrame, team_ids: dict[str, str],
 ) -> pd.DataFrame:
-    """Backfill boxscore stats + AP rank for existing games missing them."""
-    missing_mask = df["team_fgm"].isna()
+    """Backfill boxscore stats + AP rank for existing games missing them.
+    Only processes tracked rows — untracked mirror rows get boxscore data
+    from their tracked counterpart via create_mirror_rows."""
+    missing_mask = df["team_fgm"].isna() & (df["is_tracked"] == True)  # noqa: E712
     if not missing_mask.any():
-        print(f"  [{_now_str()}] All rows already have boxscore data.")
+        all_missing = df["team_fgm"].isna().sum()
+        if all_missing:
+            print(f"  [{_now_str()}] {all_missing} rows missing boxscore but "
+                  f"all are untracked — skipping.")
+        else:
+            print(f"  [{_now_str()}] All rows already have boxscore data.")
         return df
 
     missing_events = df[missing_mask]["event_id"].unique()
+    est_minutes = len(missing_events) * (RATE_LIMIT_SEC + 0.5) / 60
     print(f"  [{_now_str()}] Backfilling boxscore for "
-          f"{len(missing_events)} events ...")
+          f"{len(missing_events)} events (~{est_minutes:.1f} min) ...")
 
     for i, eid in enumerate(missing_events, 1):
-        if i % 50 == 0:
-            print(f"  [{_now_str()}] Progress: {i}/{len(missing_events)}")
+        if i % 25 == 0 or i == 1:
+            pct = i / len(missing_events) * 100
+            print(f"  [{_now_str()}] Boxscore progress: "
+                  f"{i}/{len(missing_events)} ({pct:.0f}%)")
 
         summary = fetch_game_summary(eid)
         if not summary:
@@ -652,20 +691,30 @@ def backfill_ap_ranks(
     tracked_ids: set[str],
     id_to_name: dict[str, str],
 ) -> pd.DataFrame:
-    """Re-scan historical scoreboards to fill in opp_ap_rank for all games."""
-    missing_dates = sorted(df[df["opp_ap_rank"].isna()]["date"].unique())
-    if not missing_dates:
-        print(f"  [{_now_str()}] All rows already have AP rank data.")
+    """Re-scan historical scoreboards to fill in opp_ap_rank for games that
+    haven't been checked yet.
+
+    Uses a sentinel column 'ap_rank_checked' to distinguish 'unranked' (NULL
+    but already checked) from 'never checked'.  Only re-fetches dates with
+    unchecked rows.
+    """
+    if "ap_rank_checked" not in df.columns:
+        df["ap_rank_checked"] = False
+
+    unchecked = df[~df["ap_rank_checked"].fillna(False).astype(bool)]
+    if unchecked.empty:
+        print(f"  [{_now_str()}] All rows already checked for AP ranks.")
         return df
 
+    missing_dates = sorted(unchecked["date"].unique())
     print(f"  [{_now_str()}] Backfilling AP ranks for "
-          f"{len(missing_dates)} dates ...")
+          f"{len(missing_dates)} dates ({len(unchecked)} unchecked rows) ...")
 
     # Build a lookup: (event_id, competitor_id) -> ap_rank
     rank_lookup: dict[tuple[str, str], int | None] = {}
 
     for i, date_str in enumerate(missing_dates, 1):
-        if i % 20 == 0:
+        if i % 20 == 0 or i == 1:
             print(f"  [{_now_str()}] Progress: {i}/{len(missing_dates)} dates")
         dt = datetime.strptime(date_str, "%Y-%m-%d")
         events = fetch_scoreboard(dt)
@@ -679,9 +728,9 @@ def backfill_ap_ranks(
                 rank = _extract_ap_rank(c)
                 rank_lookup[(event_id, cid)] = rank
 
-    # Apply ranks to dataframe
+    # Apply ranks to unchecked rows
     filled = 0
-    for idx in df[df["opp_ap_rank"].isna()].index:
+    for idx in unchecked.index:
         row = df.loc[idx]
         opp_id = str(row.get("opponent_id", ""))
         eid = row["event_id"]
@@ -689,6 +738,7 @@ def backfill_ap_ranks(
         if rank is not None:
             df.at[idx, "opp_ap_rank"] = rank
             filled += 1
+        df.at[idx, "ap_rank_checked"] = True
 
     total_ranked = df["opp_ap_rank"].notna().sum()
     print(f"  [{_now_str()}] AP rank backfill done: "
@@ -858,20 +908,35 @@ def phase1_fetch_opponent_games(
 
     existing_keys: set[tuple[str, str]] = set(zip(df["team"], df["event_id"]))
 
+    # Skip opponents that already have game rows in the dataset
+    # (they were fetched in a prior run)
+    teams_with_rows = set(df["team"].unique())
+    already_fetched = {oid for oid, name in opp_id_to_name.items()
+                       if name in teams_with_rows}
+    new_opp_ids = all_opp_ids - already_fetched
+    if already_fetched:
+        print(f"  [{_now_str()}] Skipping {len(already_fetched)} opponents "
+              f"already in dataset, {len(new_opp_ids)} new to fetch")
+    all_opp_ids = new_opp_ids
+
     if not all_opp_ids:
         print(f"  [{_now_str()}] No non-tournament opponents to fetch.")
         return df
 
+    est_minutes = len(all_opp_ids) * (RATE_LIMIT_SEC + 0.5) / 60
     print(f"[{_now_str()}] Fetching schedules for {len(all_opp_ids)} "
-          f"non-tournament opponents ...")
+          f"non-tournament opponents (~{est_minutes:.1f} min) ...")
 
     all_new_rows: list[dict] = []
     events_fetched: set[str] = set()
 
     for i, opp_id in enumerate(sorted(all_opp_ids), 1):
         opp_name = opp_id_to_name.get(opp_id, f"Team-{opp_id}")
-        if i % 50 == 0:
-            print(f"  [{_now_str()}] Progress: {i}/{len(all_opp_ids)}")
+        if i % 25 == 0 or i == 1:
+            pct = i / len(all_opp_ids) * 100
+            print(f"  [{_now_str()}] Opponent schedule {i}/{len(all_opp_ids)} "
+                  f"({pct:.0f}%): {opp_name} — "
+                  f"{len(all_new_rows)} new rows so far")
 
         url = f"{ESPN_BASE}/teams/{opp_id}/schedule"
         data = api_get(url, params={"season": SEASON}, tag=f"schedule-{opp_id}")
@@ -1025,6 +1090,9 @@ def phase1_fetch_games(
 
     for i, date in enumerate(dates_to_fetch, 1):
         date_str = date.strftime("%Y-%m-%d")
+        if i % 10 == 0 or i == 1 or len(dates_to_fetch) <= 5:
+            print(f"  [{_now_str()}] Scanning date {i}/{len(dates_to_fetch)}: "
+                  f"{date_str}")
 
         events = fetch_scoreboard(date)
         if not events:
@@ -1070,27 +1138,16 @@ def phase1_fetch_games(
 # PHASE 2 — Fetch odds for new dates only (The Odds API)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def fetch_daily_odds(date_str: str) -> dict:
-    """Fetch a single odds snapshot for a game date.
+def _compute_opening_snap_time(date_str: str) -> str:
+    """Compute an 'opening' snapshot timestamp for a game date.
 
-    ESPN dates games in ET, but evening-ET games have UTC commence times
-    that fall on the next calendar day.  A single snapshot from the
-    previous day at ~5 PM ET reliably captures lines for all games.
+    Uses 9 AM ET on the game day — lines are typically posted by then
+    and should differ from the closing (game-time) snapshot.
     """
     dt = datetime.strptime(date_str, "%Y-%m-%d")
     offset_h = 5 if (dt.month >= 11 or dt.month <= 2) else 4
-    prev_day = dt - timedelta(days=1)
-    snap_dt = prev_day + timedelta(hours=17 + offset_h)
-
-    url = f"{ODDS_BASE}/v4/historical/sports/basketball_ncaab/odds"
-    snap = api_get(url, params={
-        "apiKey": THE_ODDS_API_KEY,
-        "regions": "us",
-        "markets": "h2h,spreads",
-        "oddsFormat": "american",
-        "date": snap_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }, tag=f"odds-{date_str}")
-    return {"snap": snap}
+    snap_dt = dt + timedelta(hours=9 + offset_h)  # 9 AM ET in UTC
+    return snap_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _load_team_name_map() -> dict[str, str]:
@@ -1132,10 +1189,37 @@ def _first_bookmaker_value(
     return None
 
 
+def _odds_cache_path(timestamp_iso: str) -> Path:
+    """Return the cache file path for an odds snapshot timestamp."""
+    safe_name = timestamp_iso.replace(":", "-").replace("Z", "")
+    return ODDS_CACHE_DIR / f"{safe_name}.json"
+
+
+def _load_cached_odds(timestamp_iso: str) -> dict | None:
+    """Load a cached odds snapshot if it exists."""
+    path = _odds_cache_path(timestamp_iso)
+    if path.exists():
+        with open(path, "r") as f:
+            return json.load(f)
+    return None
+
+
+def _save_odds_cache(timestamp_iso: str, data: dict) -> None:
+    """Save an odds snapshot to the local cache."""
+    ODDS_CACHE_DIR.mkdir(exist_ok=True)
+    path = _odds_cache_path(timestamp_iso)
+    with open(path, "w") as f:
+        json.dump(data, f)
+
+
 def fetch_odds_snapshot(timestamp_iso: str) -> dict | None:
-    """Fetch a single historical odds snapshot at the given ISO timestamp."""
+    """Fetch a historical odds snapshot, using local cache when available."""
+    cached = _load_cached_odds(timestamp_iso)
+    if cached is not None:
+        return cached
+
     url = f"{ODDS_BASE}/v4/historical/sports/basketball_ncaab/odds"
-    return api_get(url, params={
+    data = api_get(url, params={
         "apiKey": THE_ODDS_API_KEY,
         "regions": "us",
         "markets": "h2h,spreads",
@@ -1143,47 +1227,100 @@ def fetch_odds_snapshot(timestamp_iso: str) -> dict | None:
         "date": timestamp_iso,
     }, tag=f"odds-snap-{timestamp_iso[:16]}")
 
+    if data is not None:
+        _save_odds_cache(timestamp_iso, data)
+    return data
 
-def phase2_backfill_odds(df: pd.DataFrame) -> pd.DataFrame:
+
+def phase2_backfill_odds(
+    df: pd.DataFrame, date_filter: str | None = None,
+) -> pd.DataFrame:
     """Backfill true opening and closing lines using per-game snapshots.
 
     For each unique commence_time, fetches the snapshot at floor(commence_time)
     for closing lines.  Opening lines come from the earliest snapshot where
     each game first appeared.
+
+    Args:
+        date_filter: Optional YYYY-MM-DD string to scope backfill to a single
+                     date. If None, backfills all missing.
     """
     if not THE_ODDS_API_KEY:
         print(f"[{_now_str()}] Backfill odds: skipped (no Odds API key).")
         return df
 
-    # Only rows with commence times
-    has_ct = df["commence_time_utc"].notna() & (df["commence_time_utc"] != "")
-    if not has_ct.any():
-        print(f"[{_now_str()}] Backfill odds: no commence times available.")
+    # Ensure odds_checked column exists
+    if "odds_checked" not in df.columns:
+        df["odds_checked"] = False
+
+    # Only tracked rows that haven't been checked yet and have commence times
+    needs_odds = (
+        (~df["odds_checked"].fillna(False).astype(bool)) &
+        (df["commence_time_utc"].notna()) &
+        (df["commence_time_utc"] != "") &
+        (df["is_tracked"] == True)  # noqa: E712
+    )
+
+    if date_filter:
+        needs_odds = needs_odds & (df["date"] == date_filter)
+
+    if not needs_odds.any():
+        scope = f"on {date_filter}" if date_filter else "overall"
+        print(f"[{_now_str()}] Backfill odds: no tracked rows missing odds "
+              f"{scope}.")
         return df
 
-    # Compute floor(commence_time) for each game — truncate to hour
-    ct_series = pd.to_datetime(df.loc[has_ct, "commence_time_utc"], utc=True,
+    scope_msg = f" (date: {date_filter})" if date_filter else ""
+    print(f"[{_now_str()}] Backfill odds: {needs_odds.sum()} tracked rows "
+          f"missing odds{scope_msg}")
+
+    # Compute floor(commence_time) ONLY for rows needing odds
+    ct_series = pd.to_datetime(df.loc[needs_odds, "commence_time_utc"], utc=True,
                                errors="coerce")
     floor_times = ct_series.dt.floor("h")
 
-    # Deduplicate snapshot times
+    # Deduplicate snapshot times (only hours where tracked rows need odds)
     unique_snaps = sorted(floor_times.dropna().unique())
-    print(f"[{_now_str()}] Backfill odds: {len(unique_snaps)} unique snapshot "
-          f"times to fetch ...")
 
-    # Fetch all snapshots chronologically
+    # Check how many are already cached
+    snap_isos = [pd.Timestamp(t).strftime("%Y-%m-%dT%H:%M:%SZ")
+                 for t in unique_snaps]
+    cached_count = sum(1 for s in snap_isos if _load_cached_odds(s) is not None)
+    api_count = len(unique_snaps) - cached_count
+    est_minutes = api_count * (RATE_LIMIT_SEC + 0.5) / 60
+    print(f"[{_now_str()}] Backfill odds: {len(unique_snaps)} snapshots needed "
+          f"({cached_count} cached, {api_count} to fetch"
+          f"{f', ~{est_minutes:.1f} min, ~{api_count * 20} credits' if api_count else ''})")
+
+    # Fetch all snapshots chronologically (cache hits are instant)
     snapshots: dict[str, dict] = {}
-    for i, snap_time in enumerate(unique_snaps, 1):
-        snap_iso = pd.Timestamp(snap_time).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if i % 50 == 0:
-            print(f"  [{_now_str()}] Progress: {i}/{len(unique_snaps)} snapshots")
+    failed = 0
+    fetched = 0
+    for i, snap_iso in enumerate(snap_isos, 1):
+        is_cached = _load_cached_odds(snap_iso) is not None
+        if not is_cached and (fetched % 10 == 0 or fetched == 0):
+            pct = i / len(unique_snaps) * 100
+            print(f"  [{_now_str()}] Fetching snapshot {i}/{len(unique_snaps)} "
+                  f"({pct:.0f}%) — {snap_iso}")
         snap_data = fetch_odds_snapshot(snap_iso)
         if snap_data:
+            games_in_snap = len(snap_data.get("data", []))
             snapshots[snap_iso] = snap_data
+            if not is_cached:
+                fetched += 1
+                if fetched <= 3 or fetched % 25 == 0:
+                    print(f"    -> {games_in_snap} games in snapshot")
+        else:
+            failed += 1
 
     if not snapshots:
-        print(f"  [{_now_str()}] Backfill odds: no snapshots returned.")
+        print(f"  [{_now_str()}] Backfill odds: no snapshots returned "
+              f"({failed} failed).")
+        print_odds_api_usage()
         return df
+    print(f"  [{_now_str()}] Loaded {len(snapshots)} snapshots "
+          f"({cached_count} cached, {fetched} fetched, {failed} failed)")
+    print_odds_api_usage()
 
     # Build opening index: (team_lower, commence_time) -> earliest_snapshot_iso
     opening_index: dict[tuple[str, str], str] = {}
@@ -1198,20 +1335,31 @@ def phase2_backfill_odds(df: pd.DataFrame) -> pd.DataFrame:
                 if key not in opening_index:
                     opening_index[key] = snap_iso
 
-    # Assign lines to each row
+    # Assign lines to rows that need odds
+    target_indices = df[needs_odds].index
+    total_rows = len(target_indices)
     filled = 0
-    for idx in df[has_ct].index:
+    no_odds_name = 0
+    no_closing_snap = 0
+    no_closing_match = 0
+    no_opening_snap = 0
+    print(f"  [{_now_str()}] Matching odds to {total_rows} unchecked rows ...")
+
+    for row_num, idx in enumerate(target_indices, 1):
         row = df.loc[idx]
         canonical = row["team"]
         odds_name = _TEAM_NAME_MAP.get(canonical, "") or \
                     ODDS_NAME_MAP.get(canonical, "")
         if not odds_name:
+            no_odds_name += 1
+            df.at[idx, "odds_checked"] = True
             continue
         team_odds_lower = odds_name.lower()
 
         ct_val = pd.to_datetime(row["commence_time_utc"], utc=True,
                                 errors="coerce")
         if pd.isna(ct_val):
+            df.at[idx, "odds_checked"] = True
             continue
 
         floor_iso = ct_val.floor("h").strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1226,6 +1374,10 @@ def phase2_backfill_odds(df: pd.DataFrame) -> pd.DataFrame:
                     bm, "h2h", team_odds_lower, "price")
                 df.at[idx, "closing_fg_spread"] = _first_bookmaker_value(
                     bm, "spreads", team_odds_lower, "point")
+            else:
+                no_closing_match += 1
+        else:
+            no_closing_snap += 1
 
         # Opening line: earliest snapshot where this game appeared
         ct_str = row["commence_time_utc"]
@@ -1245,43 +1397,33 @@ def phase2_backfill_odds(df: pd.DataFrame) -> pd.DataFrame:
                 df.at[idx, "opening_fg_spread"] = _first_bookmaker_value(
                     bm, "spreads", team_odds_lower, "point")
                 filled += 1
+        else:
+            no_opening_snap += 1
+
+        # Mark as checked regardless of whether we found odds
+        df.at[idx, "odds_checked"] = True
+
+        if row_num % 500 == 0:
+            print(f"    [{_now_str()}] Processed {row_num}/{total_rows} rows "
+                  f"({filled} matched so far)")
 
     matched = df["closing_fg_spread"].notna().sum()
     print(f"  [{_now_str()}] Backfill odds done: {matched}/{len(df)} rows "
           f"have closing spreads, {filled} rows got opening lines.")
+    if no_odds_name or no_closing_snap or no_closing_match:
+        print(f"    Skipped: {no_odds_name} no odds name, "
+              f"{no_closing_snap} no closing snapshot, "
+              f"{no_closing_match} no closing match, "
+              f"{no_opening_snap} no opening snapshot")
     return df
 
 
-def extract_odds_for_game(
-    odds_data: dict, canonical_name: str, opp_display_name: str,
-) -> dict:
-    result = {
-        "opening_fg_ml": None, "closing_fg_ml": None,
-        "opening_fg_spread": None, "closing_fg_spread": None,
-    }
-    odds_name = _TEAM_NAME_MAP.get(canonical_name, "") or \
-                ODDS_NAME_MAP.get(canonical_name, "")
-    if not odds_name:
-        return result
-    team_odds_lower = odds_name.lower()
-
-    game = _find_team_in_odds(odds_data.get("snap"), team_odds_lower)
-    if not game:
-        return result
-
-    bookmakers = game.get("bookmakers", [])
-    # Single snapshot → same values for opening and closing
-    ml = _first_bookmaker_value(bookmakers, "h2h", team_odds_lower, "price")
-    spread = _first_bookmaker_value(bookmakers, "spreads", team_odds_lower, "point")
-    result["opening_fg_ml"] = ml
-    result["closing_fg_ml"] = ml
-    result["opening_fg_spread"] = spread
-    result["closing_fg_spread"] = spread
-    return result
-
-
 def phase2_fetch_odds(df: pd.DataFrame, new_dates: set[str]) -> pd.DataFrame:
-    """Fetch odds ONLY for dates that had new games in Phase 1."""
+    """Fetch odds for dates that had new games in Phase 1.
+
+    Uses game-time snapshots for closing lines and an early-day snapshot
+    for opening lines — same approach as backfill, scoped to new dates.
+    """
     if not THE_ODDS_API_KEY:
         print(f"[{_now_str()}] Phase 2: skipped (no Odds API key).")
         return df
@@ -1290,28 +1432,137 @@ def phase2_fetch_odds(df: pd.DataFrame, new_dates: set[str]) -> pd.DataFrame:
         print(f"[{_now_str()}] Phase 2: no new dates to fetch odds for.")
         return df
 
-    sorted_dates = sorted(new_dates)
-    print(f"[{_now_str()}] Phase 2: fetching odds for {len(sorted_dates)} "
-          f"date(s) ({len(sorted_dates) } API calls) ...")
+    # Filter to tracked rows on new dates that need odds
+    mask = (
+        df["date"].isin(new_dates) &
+        (df["is_tracked"] == True) &  # noqa: E712
+        df["closing_fg_spread"].isna() &
+        df["commence_time_utc"].notna() &
+        (df["commence_time_utc"] != "")
+    )
+    if not mask.any():
+        print(f"[{_now_str()}] Phase 2: no tracked rows need odds on new dates.")
+        return df
 
-    for i, date_str in enumerate(sorted_dates, 1):
-        print(f"  [{_now_str()}] ({i}/{len(sorted_dates)}) {date_str}")
-        odds_data = fetch_daily_odds(date_str)
+    # Compute unique closing snapshot times (floor of commence_time)
+    ct_series = pd.to_datetime(df.loc[mask, "commence_time_utc"], utc=True,
+                               errors="coerce")
+    closing_hours = sorted(ct_series.dt.floor("h").dropna().unique())
 
-        mask = df["date"] == date_str
-        for idx in df[mask].index:
-            row = df.loc[idx]
-            # Only fill in odds if not already present
-            if pd.notna(row.get("closing_fg_spread")):
-                continue
-            odds = extract_odds_for_game(
-                odds_data, row["team"], row["opponent"])
-            for col, val in odds.items():
-                if val is not None:
-                    df.at[idx, col] = val
+    # Compute unique opening snapshot times (9 AM ET on each game date)
+    opening_times = sorted({_compute_opening_snap_time(d) for d in new_dates})
+
+    # Deduplicate all snapshot times
+    all_snap_times = sorted(set(
+        [pd.Timestamp(t).strftime("%Y-%m-%dT%H:%M:%SZ") for t in closing_hours]
+        + opening_times
+    ))
+
+    cached_count = sum(1 for s in all_snap_times
+                       if _load_cached_odds(s) is not None)
+    api_count = len(all_snap_times) - cached_count
+    print(f"[{_now_str()}] Phase 2: {mask.sum()} tracked rows need odds "
+          f"across {len(new_dates)} date(s)")
+    print(f"  {len(all_snap_times)} snapshots "
+          f"({len(closing_hours)} closing + {len(opening_times)} opening, "
+          f"deduped to {len(all_snap_times)}) — "
+          f"{cached_count} cached, {api_count} to fetch")
+
+    # Fetch all snapshots (cache hits are instant)
+    snapshots: dict[str, dict] = {}
+    for i, snap_iso in enumerate(all_snap_times, 1):
+        is_cached = _load_cached_odds(snap_iso) is not None
+        snap_data = fetch_odds_snapshot(snap_iso)
+        if snap_data:
+            games_in_snap = len(snap_data.get("data", []))
+            snapshots[snap_iso] = snap_data
+            label = "cached" if is_cached else "fetched"
+            print(f"  [{_now_str()}] ({i}/{len(all_snap_times)}) {snap_iso} "
+                  f"— {games_in_snap} games ({label})")
+
+    print_odds_api_usage()
+
+    if not snapshots:
+        print(f"  [{_now_str()}] Phase 2: no snapshots returned.")
+        return df
+
+    # Build opening index: (team_lower, commence_time) -> earliest snapshot
+    opening_index: dict[tuple[str, str], str] = {}
+    for snap_iso in sorted(snapshots.keys()):
+        snap_data = snapshots[snap_iso]
+        for game in snap_data.get("data", []):
+            ct = game.get("commence_time", "")
+            home = game.get("home_team", "").lower()
+            away = game.get("away_team", "").lower()
+            for team_lower in (home, away):
+                key = (team_lower, ct)
+                if key not in opening_index:
+                    opening_index[key] = snap_iso
+
+    # Ensure odds_checked column exists
+    if "odds_checked" not in df.columns:
+        df["odds_checked"] = False
+
+    # Assign lines to rows
+    filled_closing = 0
+    filled_opening = 0
+    no_odds_name = 0
+
+    for idx in df[mask].index:
+        row = df.loc[idx]
+        canonical = row["team"]
+        odds_name = _TEAM_NAME_MAP.get(canonical, "") or \
+                    ODDS_NAME_MAP.get(canonical, "")
+        if not odds_name:
+            no_odds_name += 1
+            df.at[idx, "odds_checked"] = True
+            continue
+        team_odds_lower = odds_name.lower()
+
+        ct_val = pd.to_datetime(row["commence_time_utc"], utc=True,
+                                errors="coerce")
+        if pd.isna(ct_val):
+            df.at[idx, "odds_checked"] = True
+            continue
+
+        # Closing line: snapshot at floor(commence_time)
+        floor_iso = ct_val.floor("h").strftime("%Y-%m-%dT%H:%M:%SZ")
+        closing_snap = snapshots.get(floor_iso)
+        if closing_snap:
+            game = _find_team_in_odds(closing_snap, team_odds_lower)
+            if game:
+                bm = game.get("bookmakers", [])
+                df.at[idx, "closing_fg_ml"] = _first_bookmaker_value(
+                    bm, "h2h", team_odds_lower, "price")
+                df.at[idx, "closing_fg_spread"] = _first_bookmaker_value(
+                    bm, "spreads", team_odds_lower, "point")
+                filled_closing += 1
+
+        # Opening line: earliest snapshot where this game appeared
+        ct_str = row["commence_time_utc"]
+        open_snap_iso = opening_index.get((team_odds_lower, ct_str))
+        if not open_snap_iso:
+            ct_iso = ct_val.strftime("%Y-%m-%dT%H:%M:%SZ")
+            open_snap_iso = opening_index.get((team_odds_lower, ct_iso))
+        if open_snap_iso and open_snap_iso in snapshots:
+            open_snap = snapshots[open_snap_iso]
+            game = _find_team_in_odds(open_snap, team_odds_lower)
+            if game:
+                bm = game.get("bookmakers", [])
+                df.at[idx, "opening_fg_ml"] = _first_bookmaker_value(
+                    bm, "h2h", team_odds_lower, "price")
+                df.at[idx, "opening_fg_spread"] = _first_bookmaker_value(
+                    bm, "spreads", team_odds_lower, "point")
+                filled_opening += 1
+
+        # Mark as checked regardless of whether we found odds
+        df.at[idx, "odds_checked"] = True
 
     matched = df["closing_fg_spread"].notna().sum()
-    print(f"  [{_now_str()}] Phase 2 done: {matched}/{len(df)} rows have spreads.")
+    print(f"  [{_now_str()}] Phase 2 done: {filled_closing} closing, "
+          f"{filled_opening} opening lines matched "
+          f"({no_odds_name} skipped — no odds name)")
+    print(f"  [{_now_str()}] Total rows with spreads: {matched}/{len(df)}")
     return df
 
 
@@ -1355,7 +1606,11 @@ def phase3_compute_pit(
     pit: dict[str, dict[str, dict]] = {}
 
     all_teams = list(df["team"].unique())
-    for team_name in all_teams:
+    print(f"  [{_now_str()}] Computing PIT for {len(all_teams)} teams, "
+          f"{len(df)} rows ...")
+    for t_idx, team_name in enumerate(all_teams, 1):
+        if t_idx % 100 == 0 or t_idx == 1:
+            print(f"  [{_now_str()}] PIT progress: {t_idx}/{len(all_teams)} teams")
         team_rows = df[df["team"] == team_name].sort_values("date")
         if team_rows.empty:
             pit[team_name] = {}
@@ -1744,6 +1999,61 @@ CSV_COLUMNS = {
 }
 
 
+def rebuild_odds_history() -> None:
+    """Rebuild the flattened odds history parquet from all cached snapshots."""
+    if not ODDS_CACHE_DIR.exists():
+        return
+
+    cache_files = sorted(ODDS_CACHE_DIR.glob("*.json"))
+    if not cache_files:
+        return
+
+    # Check if rebuild is needed (any new cache files since last build?)
+    if ODDS_HISTORY_FILE.exists():
+        history_mtime = ODDS_HISTORY_FILE.stat().st_mtime
+        newest_cache = max(f.stat().st_mtime for f in cache_files)
+        if newest_cache <= history_mtime:
+            print(f"[{_now_str()}] Odds history: up to date "
+                  f"({len(cache_files)} snapshots)")
+            return
+
+    all_rows: list[dict] = []
+    for f in cache_files:
+        with open(f, "r") as fh:
+            data = json.load(fh)
+        snapshot_time = data.get("timestamp", "")
+        for game in data.get("data", []):
+            game_id = game.get("id", "")
+            commence_time = game.get("commence_time", "")
+            home_team = game.get("home_team", "")
+            away_team = game.get("away_team", "")
+            for bm in game.get("bookmakers", []):
+                bookmaker = bm.get("key", "")
+                last_update = bm.get("last_update", "")
+                for mkt in bm.get("markets", []):
+                    market = mkt.get("key", "")
+                    for oc in mkt.get("outcomes", []):
+                        all_rows.append({
+                            "snapshot_time": snapshot_time,
+                            "game_id": game_id,
+                            "commence_time": commence_time,
+                            "home_team": home_team,
+                            "away_team": away_team,
+                            "bookmaker": bookmaker,
+                            "last_update": last_update,
+                            "market": market,
+                            "outcome": oc.get("name", ""),
+                            "price": oc.get("price"),
+                            "point": oc.get("point"),
+                        })
+
+    df = pd.DataFrame(all_rows)
+    df.to_parquet(ODDS_HISTORY_FILE, index=False, engine="pyarrow")
+    snap_count = len(cache_files)
+    print(f"[{_now_str()}] Odds history: rebuilt from {snap_count} snapshots "
+          f"({len(df):,} rows, {ODDS_HISTORY_FILE.stat().st_size // 1024}KB)")
+
+
 def phase4_export_csv(df: pd.DataFrame) -> None:
     # Only export tournament team rows
     tracked = df[df["is_tracked"] == True]  # noqa: E712
@@ -1763,8 +2073,11 @@ def phase4_export_csv(df: pd.DataFrame) -> None:
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backfill-odds", action="store_true",
-                        help="Fetch odds for ALL dates with missing odds data")
+    parser.add_argument("--backfill-odds", nargs="?", const="all", default=None,
+                        metavar="DATE",
+                        help="Fetch odds for missing data. Optional DATE "
+                             "(YYYY-MM-DD) to scope to a single date, or "
+                             "omit for all missing dates.")
     parser.add_argument("--backfill-boxscore", action="store_true",
                         help="Fetch boxscore stats for existing games missing them")
     parser.add_argument("--backfill-ranks", action="store_true",
@@ -1796,15 +2109,44 @@ def main():
             df.loc[df["is_tracked"].isna(), "team"].isin(tracked_names)
         )
 
-    print(f"[{_now_str()}] Loaded {len(df)} existing rows.\n")
+    # Show existing data summary
+    existing_spreads = df["closing_fg_spread"].notna().sum() if not df.empty else 0
+    existing_boxscore = df["team_fgm"].notna().sum() if not df.empty else 0
+    print(f"[{_now_str()}] Loaded {len(df)} existing rows "
+          f"({existing_spreads} with spreads, {existing_boxscore} with boxscore)")
+
+    # Show what we're about to do
+    flags = []
+    if args.backfill_odds:
+        if args.backfill_odds == "all":
+            flags.append("backfill-odds (ALL missing dates)")
+        else:
+            flags.append(f"backfill-odds (date: {args.backfill_odds})")
+    if args.backfill_boxscore:
+        flags.append("backfill-boxscore")
+    if args.backfill_ranks:
+        flags.append("backfill-ranks")
+    if args.backfill_times:
+        flags.append("backfill-times")
+    if args.backfill_opponents:
+        flags.append("backfill-opponents")
+    if flags:
+        print(f"[{_now_str()}] Flags: {', '.join(flags)}")
+    else:
+        print(f"[{_now_str()}] Mode: daily incremental (new dates only)")
+    print()
 
     # Phase 1: new games
     df, new_dates = phase1_fetch_games(df, team_ids, tracked_ids, id_to_name)
 
     # Phase 2: odds
     if args.backfill_odds:
-        print(f"[{_now_str()}] Backfill mode: true opening/closing lines")
-        df = phase2_backfill_odds(df)
+        date_filter = None if args.backfill_odds == "all" else args.backfill_odds
+        if date_filter:
+            print(f"[{_now_str()}] Backfill mode: odds for {date_filter}")
+        else:
+            print(f"[{_now_str()}] Backfill mode: true opening/closing lines (all)")
+        df = phase2_backfill_odds(df, date_filter=date_filter)
     else:
         df = phase2_fetch_odds(df, new_dates)
 
@@ -1843,6 +2185,9 @@ def main():
     # Save final with PIT columns
     save_game_logs(df)
 
+    # Rebuild odds history parquet from cache (no API calls)
+    rebuild_odds_history()
+
     tracked_df = df[df["is_tracked"] == True]  # noqa: E712
     spread_count = tracked_df["closing_fg_spread"].notna().sum()
     boxscore_count = df["team_fgm"].notna().sum()
@@ -1850,11 +2195,13 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"  DONE! {len(df)} total rows ({len(tracked_df)} tracked), "
           f"{df['team'].nunique()} teams")
+    print_odds_api_usage()
     print(f"  Rows with spreads:  {spread_count}/{len(tracked_df)}")
     print(f"  Rows with boxscore: {boxscore_count}/{len(df)}")
     print(f"  Opp PIT filled:     {opp_pit_filled}/{len(tracked_df)}")
     print(f"  Parquet: {PARQUET_FILE}")
     print(f"  CSV:     {CSV_FILE}")
+    print(f"  Odds DB: {ODDS_HISTORY_FILE}")
     print(f"{'=' * 60}")
 
 
