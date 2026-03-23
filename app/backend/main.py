@@ -70,7 +70,7 @@ PIT_STATS = [
 # ── data loading ───────────────────────────────────────────────────────────
 
 def load_data():
-    global DF, GAMES_DF, ODDS_DF, TEAM_STATS_TIMELINE
+    global DF, GAMES_DF, ODDS_DF, TEAM_STATS_TIMELINE, TEAM_RANKS
 
     print("Loading game logs...")
     DF = pd.read_parquet(PARQUET_FILE)
@@ -107,6 +107,24 @@ def load_data():
             if stats:
                 timeline.append((row["date"], stats))
         TEAM_STATS_TIMELINE[team] = timeline
+
+    # Compute ordinal ranks from each team's latest stats
+    print("Computing team ranks...")
+    LOWER_BETTER = {"to_pg", "sos", "def_2pt_pct", "def_3pt_pct", "def_ft_pct",
+                    "def_ftm_pg", "def_fta_pg", "def_2pm_pg", "def_2pa_pg",
+                    "def_3pm_pg", "def_3pa_pg"}
+    latest = tracked.sort_values("date").groupby("team").last()
+    TEAM_RANKS = {}  # stat -> {team: rank}
+    for stat in PIT_STATS:
+        col = f"team_{stat}"
+        if col not in latest.columns:
+            continue
+        valid = latest[col].dropna()
+        if len(valid) == 0:
+            continue
+        ascending = stat in LOWER_BETTER
+        ranks = valid.rank(ascending=ascending, method="min").astype(int)
+        TEAM_RANKS[stat] = ranks.to_dict()
 
     # Load odds history
     if ODDS_HISTORY_FILE.exists():
@@ -634,20 +652,22 @@ def get_games(date: str = Query(..., description="YYYY-MM-DD")):
     day = DF[DF["date"] == date]
     tracked = day[day["is_tracked"] == True]
 
-    # Deduplicate: for games between two tracked teams, pick each once
-    seen_events = set()
-    games = []
+    # Group by event, merge both rows to get both teams' MLs
+    from collections import defaultdict
+    event_rows = defaultdict(list)
     for _, row in tracked.iterrows():
         eid = row.get("event_id", "")
-        team = row["team"]
-        key = f"{eid}_{team}" if eid else f"{date}_{team}"
-        if key in seen_events:
-            continue
-        seen_events.add(key)
+        key = eid if eid else f"{date}_{row['team']}"
+        event_rows[key].append(row)
+
+    games = []
+    for key, rows in event_rows.items():
+        row = rows[0]
+        opp_closing_ml = _safe_int(rows[1].get("closing_fg_ml")) if len(rows) > 1 else None
 
         game = {
-            "event_id": str(eid) if pd.notna(eid) else "",
-            "team": team,
+            "event_id": str(row.get("event_id", "")) if pd.notna(row.get("event_id")) else "",
+            "team": row["team"],
             "opponent": row.get("opponent", ""),
             "home_away": row.get("home_away", ""),
             "neutral_site": bool(row.get("neutral_site", False)),
@@ -659,13 +679,16 @@ def get_games(date: str = Query(..., description="YYYY-MM-DD")):
             "closing_spread": _safe_float(row.get("closing_fg_spread")),
             "opening_ml": _safe_int(row.get("opening_fg_ml")),
             "closing_ml": _safe_int(row.get("closing_fg_ml")),
+            "opp_closing_ml": opp_closing_ml,
             "covered": bool(row.get("covered", False)) if pd.notna(row.get("ats_margin")) else None,
             "ats_margin": _safe_float(row.get("ats_margin")),
-            "team_conference": CONFERENCE_MAP.get(team, ""),
+            "team_conference": CONFERENCE_MAP.get(row["team"], ""),
             "opp_conference": CONFERENCE_MAP.get(row.get("opponent", ""), ""),
-            # PIT stats
+            # PIT stats and ranks
             "team_stats": _extract_pit_stats(row, "team"),
             "opp_stats": _extract_pit_stats(row, "opp"),
+            "team_ranks": {s: TEAM_RANKS.get(s, {}).get(row["team"]) for s in PIT_STATS},
+            "opp_ranks": {s: TEAM_RANKS.get(s, {}).get(row.get("opponent", "")) for s in PIT_STATS},
         }
         games.append(game)
 

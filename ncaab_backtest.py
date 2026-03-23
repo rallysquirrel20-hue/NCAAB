@@ -51,8 +51,9 @@ def backtest(df: pd.DataFrame, mask: pd.Series, name: str) -> dict:
     losses = n - wins
     win_pct = wins / n
 
-    # ROI at -110 juice: win pays 100/110, loss costs 1
-    profit = wins * (100 / abs(JUICE)) - losses
+    # "To win" sizing: risk abs(JUICE)/100 per bet to win 1 unit
+    risk_per_unit = abs(JUICE) / 100  # 1.1 for -110
+    profit = wins - losses * risk_per_unit
     roi = profit / n * 100
 
     # Binomial test: is win rate significantly different from 50%?

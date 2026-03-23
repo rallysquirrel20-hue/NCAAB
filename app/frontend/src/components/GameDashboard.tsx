@@ -17,12 +17,15 @@ interface GameData {
   closing_spread: number | null
   opening_ml: number | null
   closing_ml: number | null
+  opp_closing_ml: number | null
   covered: boolean | null
   ats_margin: number | null
   team_conference: string
   opp_conference: string
   team_stats: Record<string, number | null>
   opp_stats: Record<string, number | null>
+  team_ranks: Record<string, number | null>
+  opp_ranks: Record<string, number | null>
 }
 
 interface ESPNGame {
@@ -58,6 +61,16 @@ function formatMl(v: number | null): string {
 function formatPct(v: number | null): string {
   if (v == null) return '-'
   return `${(v * 100).toFixed(1)}%`
+}
+
+function formatRawPct(v: number | null): string {
+  if (v == null) return '-'
+  return `${v.toFixed(1)}%`
+}
+
+function formatRank(v: number | null | undefined): string {
+  if (v == null) return '-'
+  return `#${v}`
 }
 
 function formatStat(v: number | null, decimals = 1): string {
@@ -166,99 +179,130 @@ function LineMovementChart({ eventId }: { eventId: string }) {
 function GameCard({ game }: { game: GameData }) {
   const [expanded, setExpanded] = useState(false)
   const finished = game.team_score != null && game.opp_score != null
-  const teamWon = finished && game.win_loss === 'W'
+
+  // Display order: road team on top for home/away, underdog on top for neutral
+  const flip = game.home_away === 'home' ||
+    (game.home_away === 'neutral' && game.closing_spread != null && game.closing_spread < 0)
+
+  const top = {
+    name: flip ? game.opponent : game.team,
+    score: flip ? game.opp_score : game.team_score,
+    conf: flip ? game.opp_conference : game.team_conference,
+    stats: flip ? game.opp_stats : game.team_stats,
+    ranks: flip ? game.opp_ranks : game.team_ranks,
+  }
+  const bot = {
+    name: flip ? game.team : game.opponent,
+    score: flip ? game.team_score : game.opp_score,
+    conf: flip ? game.team_conference : game.opp_conference,
+    stats: flip ? game.team_stats : game.opp_stats,
+    ranks: flip ? game.team_ranks : game.opp_ranks,
+  }
+
+
+  // Covered: game.covered is from game.team's perspective
+  const isPush = game.ats_margin != null && game.ats_margin === 0
+  const teamCovered = game.covered === true && !isPush
+  const oppCovered = finished && game.covered === false && game.ats_margin != null && !isPush
+  const topCovered = flip ? oppCovered : teamCovered
+  const botCovered = flip ? teamCovered : oppCovered
+  const topSpread = game.closing_spread != null ? (flip ? -game.closing_spread : game.closing_spread) : null
+  const botSpread = game.closing_spread != null ? (flip ? game.closing_spread : -game.closing_spread) : null
+  const topMl = flip ? game.opp_closing_ml : game.closing_ml
+  const botMl = flip ? game.closing_ml : game.opp_closing_ml
 
   return (
     <div className="game-card" onClick={() => setExpanded(!expanded)}>
       <div className="game-card-header">
         <span>
-          {game.home_away === 'neutral' ? 'Neutral' :
-           game.home_away === 'home' ? 'Home' : 'Away'}
-          {game.conference_game ? ' | Conf' : ''}
+          {[
+            game.home_away === 'neutral' ? 'Neutral' : null,
+            game.conference_game ? 'Conf' : null,
+          ].filter(Boolean).join(' | ')}
         </span>
-        {finished && game.covered !== null && (
-          <span className={game.covered ? 'ats-cover' : 'ats-miss'}>
-            {game.covered ? 'COVERED' : 'MISSED'} ({game.ats_margin != null ? (game.ats_margin > 0 ? '+' : '') + game.ats_margin.toFixed(1) : ''})
-          </span>
-        )}
       </div>
 
       <div className="game-teams">
         <div className="team-row">
-          <span className={`team-name ${teamWon ? 'winner' : ''}`}>{game.team}</span>
-          <span className="team-record">{game.team_conference}</span>
-          <span className="team-score">{game.team_score ?? '-'}</span>
+          <span className={`team-name ${topCovered ? 'winner' : ''}`}>{top.name}</span>
+          <span className="team-line">{formatSpread(topSpread)} ML {formatMl(topMl)}</span>
+          <span className="team-score">{top.score ?? '-'}</span>
         </div>
         <div className="team-row">
-          <span className="team-name">{game.opponent}</span>
-          <span className="team-record">{game.opp_conference}</span>
-          <span className="team-score">{game.opp_score ?? '-'}</span>
+          <span className={`team-name ${botCovered ? 'winner' : ''}`}>{bot.name}</span>
+          <span className="team-line">{formatSpread(botSpread)} ML {formatMl(botMl)}</span>
+          <span className="team-score">{bot.score ?? '-'}</span>
         </div>
-      </div>
-
-      <div className="game-spread-row">
-        <span><span className="spread-label">Open: </span>{formatSpread(game.opening_spread)}</span>
-        <span><span className="spread-label">Close: </span>{formatSpread(game.closing_spread)}</span>
-        <span><span className="spread-label">ML: </span>{formatMl(game.closing_ml)}</span>
       </div>
 
       {expanded && (
         <>
-          <div className="game-stats-grid">
+          <div className="game-stats-grid-ranked">
             <div className="stat-cell header">Stat</div>
-            <div className="stat-cell header">{game.team.length > 12 ? game.team.slice(0, 12) + '..' : game.team}</div>
-            <div className="stat-cell header">{(game.opponent || '').length > 12 ? game.opponent.slice(0, 12) + '..' : game.opponent}</div>
-            <div className="stat-cell header">Edge</div>
+            <div className="stat-cell header">{top.name.length > 12 ? top.name.slice(0, 12) + '..' : top.name}</div>
+            <div className="stat-cell header rank">Rank</div>
+            <div className="stat-cell header">{bot.name.length > 12 ? bot.name.slice(0, 12) + '..' : bot.name}</div>
+            <div className="stat-cell header rank">Rank</div>
 
             <div className="stat-cell">Win%</div>
-            <div className="stat-cell">{formatPct(game.team_stats.win_pct)}</div>
-            <div className="stat-cell">{formatPct(game.opp_stats.win_pct)}</div>
-            <div className="stat-cell"><EdgeCell a={game.team_stats.win_pct} b={game.opp_stats.win_pct} isPct={true} /></div>
+            <div className="stat-cell">{formatPct(top.stats.win_pct)}</div>
+            <div className="stat-cell rank">{formatRank(top.ranks.win_pct)}</div>
+            <div className="stat-cell">{formatPct(bot.stats.win_pct)}</div>
+            <div className="stat-cell rank">{formatRank(bot.ranks.win_pct)}</div>
 
             <div className="stat-cell">ATS%</div>
-            <div className="stat-cell">{formatPct(game.team_stats.ats_win_pct)}</div>
-            <div className="stat-cell">{formatPct(game.opp_stats.ats_win_pct)}</div>
-            <div className="stat-cell"><EdgeCell a={game.team_stats.ats_win_pct} b={game.opp_stats.ats_win_pct} isPct={true} /></div>
+            <div className="stat-cell">{formatPct(top.stats.ats_win_pct)}</div>
+            <div className="stat-cell rank">{formatRank(top.ranks.ats_win_pct)}</div>
+            <div className="stat-cell">{formatPct(bot.stats.ats_win_pct)}</div>
+            <div className="stat-cell rank">{formatRank(bot.ranks.ats_win_pct)}</div>
 
             <div className="stat-cell">PPG</div>
-            <div className="stat-cell">{formatStat(game.team_stats.ppg)}</div>
-            <div className="stat-cell">{formatStat(game.opp_stats.ppg)}</div>
-            <div className="stat-cell"><EdgeCell a={game.team_stats.ppg} b={game.opp_stats.ppg} isPct={false} /></div>
+            <div className="stat-cell">{formatStat(top.stats.ppg)}</div>
+            <div className="stat-cell rank">{formatRank(top.ranks.ppg)}</div>
+            <div className="stat-cell">{formatStat(bot.stats.ppg)}</div>
+            <div className="stat-cell rank">{formatRank(bot.ranks.ppg)}</div>
 
             <div className="stat-cell">3PT%</div>
-            <div className="stat-cell">{formatPct(game.team_stats['3pt_pct'])}</div>
-            <div className="stat-cell">{formatPct(game.opp_stats['3pt_pct'])}</div>
-            <div className="stat-cell"><EdgeCell a={game.team_stats['3pt_pct']} b={game.opp_stats['3pt_pct']} isPct={true} /></div>
+            <div className="stat-cell">{formatRawPct(top.stats['3pt_pct'])}</div>
+            <div className="stat-cell rank">{formatRank(top.ranks['3pt_pct'])}</div>
+            <div className="stat-cell">{formatRawPct(bot.stats['3pt_pct'])}</div>
+            <div className="stat-cell rank">{formatRank(bot.ranks['3pt_pct'])}</div>
 
             <div className="stat-cell">FT%</div>
-            <div className="stat-cell">{formatPct(game.team_stats.ft_pct)}</div>
-            <div className="stat-cell">{formatPct(game.opp_stats.ft_pct)}</div>
-            <div className="stat-cell"><EdgeCell a={game.team_stats.ft_pct} b={game.opp_stats.ft_pct} isPct={true} /></div>
+            <div className="stat-cell">{formatRawPct(top.stats.ft_pct)}</div>
+            <div className="stat-cell rank">{formatRank(top.ranks.ft_pct)}</div>
+            <div className="stat-cell">{formatRawPct(bot.stats.ft_pct)}</div>
+            <div className="stat-cell rank">{formatRank(bot.ranks.ft_pct)}</div>
 
             <div className="stat-cell">Def 2P%</div>
-            <div className="stat-cell">{formatPct(game.team_stats.def_2pt_pct)}</div>
-            <div className="stat-cell">{formatPct(game.opp_stats.def_2pt_pct)}</div>
-            <div className="stat-cell"><EdgeCell a={game.team_stats.def_2pt_pct} b={game.opp_stats.def_2pt_pct} isPct={false} /></div>
+            <div className="stat-cell">{formatRawPct(top.stats.def_2pt_pct)}</div>
+            <div className="stat-cell rank">{formatRank(top.ranks.def_2pt_pct)}</div>
+            <div className="stat-cell">{formatRawPct(bot.stats.def_2pt_pct)}</div>
+            <div className="stat-cell rank">{formatRank(bot.ranks.def_2pt_pct)}</div>
 
             <div className="stat-cell">OREB/g</div>
-            <div className="stat-cell">{formatStat(game.team_stats.oreb_pg)}</div>
-            <div className="stat-cell">{formatStat(game.opp_stats.oreb_pg)}</div>
-            <div className="stat-cell"><EdgeCell a={game.team_stats.oreb_pg} b={game.opp_stats.oreb_pg} isPct={false} /></div>
+            <div className="stat-cell">{formatStat(top.stats.oreb_pg)}</div>
+            <div className="stat-cell rank">{formatRank(top.ranks.oreb_pg)}</div>
+            <div className="stat-cell">{formatStat(bot.stats.oreb_pg)}</div>
+            <div className="stat-cell rank">{formatRank(bot.ranks.oreb_pg)}</div>
 
             <div className="stat-cell">TO/g</div>
-            <div className="stat-cell">{formatStat(game.team_stats.to_pg)}</div>
-            <div className="stat-cell">{formatStat(game.opp_stats.to_pg)}</div>
-            <div className="stat-cell"><EdgeCell a={game.team_stats.to_pg} b={game.opp_stats.to_pg} isPct={false} lowerBetter={true} /></div>
+            <div className="stat-cell">{formatStat(top.stats.to_pg)}</div>
+            <div className="stat-cell rank">{formatRank(top.ranks.to_pg)}</div>
+            <div className="stat-cell">{formatStat(bot.stats.to_pg)}</div>
+            <div className="stat-cell rank">{formatRank(bot.ranks.to_pg)}</div>
 
             <div className="stat-cell">Pace</div>
-            <div className="stat-cell">{formatStat(game.team_stats.pace)}</div>
-            <div className="stat-cell">{formatStat(game.opp_stats.pace)}</div>
-            <div className="stat-cell"><EdgeCell a={game.team_stats.pace} b={game.opp_stats.pace} isPct={false} /></div>
+            <div className="stat-cell">{formatStat(top.stats.pace)}</div>
+            <div className="stat-cell rank">{formatRank(top.ranks.pace)}</div>
+            <div className="stat-cell">{formatStat(bot.stats.pace)}</div>
+            <div className="stat-cell rank">{formatRank(bot.ranks.pace)}</div>
 
             <div className="stat-cell">SOS</div>
-            <div className="stat-cell">{formatStat(game.team_stats.sos)}</div>
-            <div className="stat-cell">{formatStat(game.opp_stats.sos)}</div>
-            <div className="stat-cell"><EdgeCell a={game.team_stats.sos} b={game.opp_stats.sos} isPct={false} lowerBetter={true} /></div>
+            <div className="stat-cell">{formatStat(top.stats.sos)}</div>
+            <div className="stat-cell rank">{formatRank(top.ranks.sos)}</div>
+            <div className="stat-cell">{formatStat(bot.stats.sos)}</div>
+            <div className="stat-cell rank">{formatRank(bot.ranks.sos)}</div>
           </div>
 
           <LineMovementChart eventId={game.event_id} />
@@ -268,45 +312,8 @@ function GameCard({ game }: { game: GameData }) {
   )
 }
 
-function EdgeCell({ a, b, isPct, lowerBetter = false }: { a: number | null | undefined; b: number | null | undefined; isPct: boolean; lowerBetter?: boolean }) {
-  if (a == null || b == null) return <>-</>
-  const diff = a - b
-  const adjusted = lowerBetter ? -diff : diff
-  const formatted = isPct ? `${(diff * 100).toFixed(1)}%` : diff.toFixed(1)
-  const sign = diff > 0 ? '+' : ''
-  const cls = adjusted > 0 ? 'positive' : adjusted < 0 ? 'negative' : ''
-  return <span className={cls}>{sign}{formatted}</span>
-}
 
 
-// ── Live game card ────────────────────────────────────────────────────────
-function LiveGameCard({ game }: { game: ESPNGame }) {
-  const isLive = game.state === 'in'
-
-  return (
-    <div className={`game-card ${isLive ? 'live' : ''}`}>
-      <div className="game-card-header">
-        <span>
-          {isLive && <span className="live-dot" />}
-          {game.detail}
-        </span>
-        <span>{game.neutral_site ? 'Neutral' : ''}</span>
-      </div>
-      <div className="game-teams">
-        <div className="team-row">
-          {game.away.seed > 0 && <span className="team-seed">({game.away.seed})</span>}
-          <span className="team-name">{game.away.name}</span>
-          <span className="team-score">{game.state !== 'pre' ? game.away.score : '-'}</span>
-        </div>
-        <div className="team-row">
-          {game.home.seed > 0 && <span className="team-seed">({game.home.seed})</span>}
-          <span className="team-name">{game.home.name}</span>
-          <span className="team-score">{game.state !== 'pre' ? game.home.score : '-'}</span>
-        </div>
-      </div>
-    </div>
-  )
-}
 
 
 // ── Main Dashboard ────────────────────────────────────────────────────────
@@ -371,31 +378,14 @@ export default function GameDashboard() {
 
       {loading && <div className="loading">Loading games...</div>}
 
-      {/* Live ESPN games */}
-      {showLive && liveGames.length > 0 && (
-        <>
-          <div style={{ fontSize: 12, fontWeight: 'bold', color: 'var(--text-bold)', marginBottom: 8 }}>
-            ESPN Scoreboard ({selectedDate})
-          </div>
-          <div className="games-grid" style={{ marginBottom: 16 }}>
-            {liveGames.map(g => <LiveGameCard key={g.event_id} game={g} />)}
-          </div>
-        </>
-      )}
-
-      {/* Historical/data games */}
+      {/* Game data cards */}
       {games.length > 0 && (
-        <>
-          <div style={{ fontSize: 12, fontWeight: 'bold', color: 'var(--text-bold)', marginBottom: 8 }}>
-            Game Data ({selectedDate}) — click to expand stats
-          </div>
-          <div className="games-grid">
-            {games.map(g => <GameCard key={`${g.event_id}_${g.team}`} game={g} />)}
-          </div>
-        </>
+        <div className="games-grid">
+          {games.map(g => <GameCard key={`${g.event_id}_${g.team}`} game={g} />)}
+        </div>
       )}
 
-      {!loading && games.length === 0 && liveGames.length === 0 && (
+      {!loading && games.length === 0 && (
         <div className="empty-state">No games found for {selectedDate}</div>
       )}
     </>

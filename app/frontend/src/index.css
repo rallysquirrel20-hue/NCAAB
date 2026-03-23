@@ -176,10 +176,16 @@ html, body, #root {
 .team-name {
   font-weight: bold;
   color: var(--text-bold);
-  flex: 1;
 }
 
 .team-name.winner { color: var(--color-green); }
+
+.team-line {
+  font-size: 11px;
+  color: var(--base00);
+  margin-left: 8px;
+  flex: 1;
+}
 
 .team-score {
   font-weight: bold;
@@ -221,6 +227,15 @@ html, body, #root {
   border-top: 1px solid var(--border-color);
 }
 
+.game-stats-grid-ranked {
+  display: grid;
+  grid-template-columns: auto 1fr auto 1fr auto;
+  gap: 4px;
+  font-size: 10px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border-color);
+}
+
 .stat-cell {
   text-align: center;
   padding: 2px;
@@ -229,8 +244,12 @@ html, body, #root {
   font-weight: bold;
   color: var(--text-bold);
 }
+.stat-cell.rank {
+  color: var(--base00);
+  font-size: 9px;
+}
 
-.ats-cover { color: var(--color-green); font-weight: bold; }
+.ats-cover { color: var(--color-green); font-weight: bold; font-size: 11px; margin-left: 6px; }
 .ats-miss { color: var(--color-red); }
 
 /* Line movement chart */
