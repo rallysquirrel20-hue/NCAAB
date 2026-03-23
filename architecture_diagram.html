@@ -2,467 +2,323 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>NCAAB Pipeline Architecture</title>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NCAAB Project Architecture</title>
 <style>
+  :root {
+    --base03: #002b36; --base02: #073642; --base01: #586e75;
+    --base00: #657b83; --base0: #839496; --base1: #93a1a1;
+    --base2: #eee8d5; --base3: #fdf6e3;
+    --pink: rgb(255, 50, 150); --blue: rgb(50, 50, 255);
+    --green: #2aa198; --red: #dc322f; --yellow: #b58900; --orange: #cb4b16;
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0d1117; color: #c9d1d9; padding: 24px; }
-  h1 { color: #58a6ff; margin-bottom: 8px; font-size: 28px; }
-  h2 { color: #58a6ff; margin: 32px 0 12px; font-size: 20px; border-bottom: 1px solid #21262d; padding-bottom: 6px; }
-  h3 { color: #79c0ff; margin: 20px 0 8px; font-size: 16px; }
-  .subtitle { color: #8b949e; margin-bottom: 24px; font-size: 14px; }
-  .diagram-container { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin: 16px 0; overflow-x: auto; }
-  .mermaid { display: flex; justify-content: center; }
-  .legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 16px 0; }
-  .legend-item { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; }
-  .legend-item .file { color: #ff7b72; font-family: monospace; font-size: 13px; font-weight: 600; }
-  .legend-item .desc { color: #8b949e; font-size: 13px; margin-top: 4px; }
-  .col-table { width: 100%; border-collapse: collapse; margin: 8px 0 16px; font-size: 13px; }
-  .col-table th { background: #21262d; color: #58a6ff; text-align: left; padding: 8px 12px; font-weight: 600; }
-  .col-table td { padding: 6px 12px; border-bottom: 1px solid #21262d; }
-  .col-table td:first-child { font-family: monospace; color: #ff7b72; white-space: nowrap; }
-  .col-table tr:hover td { background: #1c2128; }
-  .phase-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; margin-right: 4px; }
-  .p1 { background: #1f3a1f; color: #7ee787; }
-  .p2 { background: #3a2a1f; color: #f0b858; }
-  .p3 { background: #1f2a3a; color: #79c0ff; }
-  .p4 { background: #3a1f2a; color: #f778ba; }
-  .bf { background: #2a2a1f; color: #d2a8ff; }
-  .note { background: #1c2128; border-left: 3px solid #58a6ff; padding: 10px 14px; margin: 12px 0; font-size: 13px; color: #8b949e; border-radius: 0 6px 6px 0; }
-  code { background: #21262d; padding: 1px 6px; border-radius: 3px; font-size: 12px; color: #79c0ff; }
+  body {
+    background: var(--base3); color: var(--base01);
+    font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace;
+    font-size: 12px; padding: 24px; line-height: 1.5;
+  }
+  h1 { font-size: 16px; color: var(--base02); margin-bottom: 24px; }
+  h2 { font-size: 13px; color: var(--base02); margin: 20px 0 8px; }
+
+  .phase {
+    background: var(--base2); border: 1px solid var(--base1);
+    padding: 12px; margin-bottom: 12px;
+  }
+  .phase-title {
+    font-weight: bold; color: var(--base02); font-size: 12px;
+    margin-bottom: 6px; display: flex; align-items: center; gap: 6px;
+  }
+  .phase-num {
+    background: var(--base01); color: var(--base3);
+    padding: 1px 6px; font-size: 10px;
+  }
+
+  .file {
+    display: flex; align-items: flex-start; gap: 6px;
+    padding: 4px 0; border-bottom: 1px solid var(--base1);
+  }
+  .file:last-child { border-bottom: none; }
+  .file-name { color: var(--blue); font-weight: bold; white-space: nowrap; min-width: 180px; }
+  .file-desc { color: var(--base00); font-size: 11px; }
+
+  .arrow-down {
+    text-align: center; color: var(--base01); font-size: 16px;
+    margin: 4px 0; letter-spacing: 2px;
+  }
+
+  .data-file { color: var(--green); font-weight: bold; }
+  .api-call { color: var(--orange); font-weight: bold; }
+  .config-file { color: var(--yellow); font-weight: bold; }
+  .component { color: var(--pink); font-weight: bold; }
+
+  .legend {
+    display: flex; gap: 16px; margin-bottom: 16px; font-size: 11px;
+    flex-wrap: wrap;
+  }
+  .legend span { display: flex; align-items: center; gap: 4px; }
+  .dot { width: 8px; height: 8px; display: inline-block; }
+
+  .note {
+    font-size: 10px; color: var(--base00); padding: 4px 8px;
+    border-left: 2px solid var(--base1); margin: 4px 0 4px 12px;
+  }
 </style>
 </head>
 <body>
 
-<h1>NCAAB Pipeline Architecture</h1>
-<p class="subtitle">Season 2025-26 &middot; 68 Tournament Teams + 348 Opponents &middot; 3,950 Rows &middot; 127 Columns</p>
-
-<!-- ================================================================== -->
-<h2>1. File Map</h2>
-<!-- ================================================================== -->
+<h1>NCAAB March Madness Betting Dashboard -- Architecture</h1>
 
 <div class="legend">
-  <div class="legend-item">
-    <div class="file">ncaab_config.py</div>
-    <div class="desc">Constants: 68 TEAMS list, CONFERENCE_MAP, ESPN_NAME_ALIASES, ODDS_NAME_MAP, HARDCODED_ESPN_IDS, API endpoints, rate limits</div>
+  <span><span class="dot" style="background:rgb(50,50,255)"></span> Source code</span>
+  <span><span class="dot" style="background:#2aa198"></span> Data file (parquet/JSON/CSV)</span>
+  <span><span class="dot" style="background:#cb4b16"></span> External API</span>
+  <span><span class="dot" style="background:#b58900"></span> Config / mapping</span>
+  <span><span class="dot" style="background:rgb(255,50,150)"></span> Frontend component</span>
+</div>
+
+<!-- ================================================================= -->
+<h2>1 -- DATA PIPELINE (run daily: python ncaab_daily_builder.py)</h2>
+<!-- ================================================================= -->
+
+<div class="phase">
+  <div class="phase-title"><span class="phase-num">CONFIG</span> Shared Constants</div>
+  <div class="file">
+    <span class="file-name config-file">ncaab_config.py</span>
+    <span class="file-desc">68 tournament teams, conference map, ESPN name aliases, Odds API name map, hardcoded ESPN IDs, API base URLs, rate limits</span>
   </div>
-  <div class="legend-item">
-    <div class="file">ncaab_daily_builder.py</div>
-    <div class="desc">Main pipeline. 4 phases + 5 backfill modes. All data fetching, computation, and export lives here (1,862 lines)</div>
+  <div class="file">
+    <span class="file-name config-file">espn_team_ids.json</span>
+    <span class="file-desc">Cached ESPN team ID resolution (canonical name -> ESPN numeric ID)</span>
   </div>
-  <div class="legend-item">
-    <div class="file">build_team_name_map.py</div>
-    <div class="desc">One-time utility. Samples Odds API on 18 busy dates, fuzzy-matches team names against ESPN directory → team_name_map.json</div>
-  </div>
-  <div class="legend-item">
-    <div class="file">.env</div>
-    <div class="desc">THE_ODDS_API_KEY (secret)</div>
-  </div>
-  <div class="legend-item">
-    <div class="file">espn_team_ids.json</div>
-    <div class="desc">Cache: canonical team name → ESPN numeric ID for 68 tournament teams</div>
-  </div>
-  <div class="legend-item">
-    <div class="file">team_name_map.json</div>
-    <div class="desc">430-entry map: ESPN display name → Odds API long-form name (e.g. "Arizona Wildcats" → "Arizona Wildcats")</div>
-  </div>
-  <div class="legend-item">
-    <div class="file">ncaab_game_logs.parquet</div>
-    <div class="desc">Primary data store. 127 columns × 3,950 rows. Read at start, written after Phase 2 and Phase 4</div>
-  </div>
-  <div class="legend-item">
-    <div class="file">ncaab_game_logs.csv</div>
-    <div class="desc">Export for analysis/Excel. 102 columns × 2,272 rows (tracked teams only). Written by Phase 4</div>
+  <div class="file">
+    <span class="file-name config-file">team_name_map.json</span>
+    <span class="file-desc">ESPN display name -> Odds API name fuzzy-match mapping</span>
   </div>
 </div>
 
-<div class="diagram-container">
-<pre class="mermaid">
-graph LR
-  subgraph Config["Config Layer"]
-    CFG["ncaab_config.py<br/><small>TEAMS, CONFERENCE_MAP<br/>ESPN_NAME_ALIASES<br/>ODDS_NAME_MAP</small>"]
-    ENV[".env<br/><small>THE_ODDS_API_KEY</small>"]
-  end
+<div class="phase">
+  <div class="phase-title"><span class="phase-num">PHASE 1</span> Fetch New Games</div>
+  <div class="file">
+    <span class="file-name">ncaab_daily_builder.py</span>
+    <span class="file-desc">Scans dates since last run. Skips already-stored event IDs.</span>
+  </div>
+  <div class="file">
+    <span class="file-name api-call">ESPN Scoreboard API</span>
+    <span class="file-desc">1 call per date -> final scores, half scores, home/away, neutral site</span>
+  </div>
+  <div class="file">
+    <span class="file-name api-call">ESPN Game Summary API</span>
+    <span class="file-desc">1 call per event -> boxscore stats (FG, 3PT, FT, rebounds, turnovers), AP rank</span>
+  </div>
+  <div class="note">Dates converted UTC -> Eastern time so late games land on correct calendar date</div>
+</div>
 
-  subgraph Cache["Cached Lookups"]
-    IDS["espn_team_ids.json<br/><small>68 team → ESPN ID</small>"]
-    NMAP["team_name_map.json<br/><small>430 ESPN ↔ OddsAPI names</small>"]
-  end
+<div class="arrow-down">|</div>
 
-  subgraph Pipeline["ncaab_daily_builder.py"]
-    P1["Phase 1<br/>Fetch Games"]
-    P2["Phase 2<br/>Fetch Odds"]
-    MR["Mirror Rows<br/>+ Opp Schedules"]
-    P3["Phase 3<br/>Compute PIT"]
-    P4["Phase 4<br/>Export CSV"]
-  end
+<div class="phase">
+  <div class="phase-title"><span class="phase-num">PHASE 2</span> Fetch Odds</div>
+  <div class="file">
+    <span class="file-name api-call">The Odds API (historical)</span>
+    <span class="file-desc">2 calls per NEW date -> opening &amp; closing snapshots for spreads + moneylines</span>
+  </div>
+  <div class="note">Closing line = snapshot at floor(commence_time). Opening = earliest snapshot.</div>
+  <div class="note">Snapshots cached in <span class="data-file">odds_cache/*.json</span> to avoid re-fetching</div>
+</div>
 
-  subgraph Data["Data Files"]
-    PQ["ncaab_game_logs.parquet<br/><small>3,950 rows × 127 cols</small>"]
-    CSV["ncaab_game_logs.csv<br/><small>2,272 rows × 102 cols</small>"]
-  end
+<div class="arrow-down">|</div>
 
-  subgraph APIs["External APIs"]
-    ESPN["ESPN API<br/><small>Scoreboard, Summary,<br/>Schedule, Teams</small>"]
-    ODDS["The Odds API<br/><small>Historical NCAAB odds</small>"]
-  end
+<div class="phase">
+  <div class="phase-title"><span class="phase-num">PHASE 3</span> Compute Point-in-Time Stats</div>
+  <div class="file">
+    <span class="file-name">ncaab_daily_builder.py</span>
+    <span class="file-desc">Pure math, zero API calls. Always recomputed from scratch (fast).</span>
+  </div>
+  <div class="note">For each team x game (chronological): snapshot running stats BEFORE the game, then update counters</div>
+  <div class="note">PIT stats: win%, ATS%, PPG, shooting splits (2PT/3PT/FT), defense, rebounds, turnovers, pace, SOS -- all per overall/home/neutral/away</div>
+  <div class="note">Opponent PIT stats populated when opponent is one of the 68 tracked teams</div>
+</div>
 
-  CFG --> Pipeline
-  ENV --> P2
-  IDS --> P1
-  NMAP --> P2
-  ESPN --> P1
-  ESPN --> MR
-  ODDS --> P2
-  P1 --> P2 --> MR --> P3 --> P4
-  PQ -- "load" --> P1
-  MR -- "save" --> PQ
-  P4 -- "save" --> PQ
-  P4 -- "write" --> CSV
+<div class="arrow-down">|</div>
 
-  BUILD["build_team_name_map.py"] --> NMAP
-  ESPN -.-> BUILD
-  ODDS -.-> BUILD
+<div class="phase">
+  <div class="phase-title"><span class="phase-num">PHASE 4</span> Export &amp; Save</div>
+  <div class="file">
+    <span class="file-name data-file">ncaab_game_logs.parquet</span>
+    <span class="file-desc">Primary data store. ~4000 rows x 129 columns. All teams, all stats.</span>
+  </div>
+  <div class="file">
+    <span class="file-name data-file">ncaab_game_logs.csv</span>
+    <span class="file-desc">CSV export -- tournament teams only (is_tracked=True), subset of columns</span>
+  </div>
+  <div class="file">
+    <span class="file-name data-file">ncaab_odds_history.parquet</span>
+    <span class="file-desc">Flattened odds snapshots (~2.5M rows). Appended incrementally from odds_cache/. Per-bookmaker spread/ML prices over time.</span>
+  </div>
+</div>
 
-  style CFG fill:#1f2a3a,stroke:#58a6ff,color:#c9d1d9
-  style ENV fill:#3a1f1f,stroke:#f85149,color:#c9d1d9
-  style IDS fill:#1f3a2a,stroke:#7ee787,color:#c9d1d9
-  style NMAP fill:#1f3a2a,stroke:#7ee787,color:#c9d1d9
-  style PQ fill:#2a1f3a,stroke:#d2a8ff,color:#c9d1d9
-  style CSV fill:#2a1f3a,stroke:#d2a8ff,color:#c9d1d9
-  style ESPN fill:#3a2a1f,stroke:#f0b858,color:#c9d1d9
-  style ODDS fill:#3a2a1f,stroke:#f0b858,color:#c9d1d9
-  style BUILD fill:#21262d,stroke:#484f58,color:#8b949e
+<!-- ================================================================= -->
+<h2>2 -- BACKEND API (FastAPI on port 8001)</h2>
+<!-- ================================================================= -->
+
+<div class="phase">
+  <div class="phase-title"><span class="phase-num">STARTUP</span> Data Loading &amp; Preprocessing</div>
+  <div class="file">
+    <span class="file-name">app/backend/main.py</span>
+    <span class="file-desc">Reads both parquets + ncaab_config.py on startup</span>
+  </div>
+  <div class="note"><b>Step 1:</b> Load game_logs.parquet -> compute ATS margin, covered, push columns</div>
+  <div class="note"><b>Step 2:</b> Build team stats timeline (team -> chronological PIT snapshots) for ranking computation</div>
+  <div class="note"><b>Step 3:</b> Load odds_history.parquet -> match closing spread prices to each game via (team, commence_time). Fills actual juice per bet.</div>
+  <div class="note"><b>Step 4:</b> Tag tournament rounds -- First Four / R64 / R32 / S16 / E8 / F4 -- by each team's game sequence, not by date</div>
+  <div class="note"><b>Step 5:</b> Build GAMES_DF -- deduplicate to one row per game (favorite's perspective). For games where tracked team is underdog, flip team/opponent/spread/covered so "team" is always the favorite. Attach underdog spread prices. Verify: favorites + underdogs have same N, bucket units sum to parent.</div>
+</div>
+
+<div class="arrow-down">|</div>
+
+<div class="phase">
+  <div class="phase-title"><span class="phase-num">ENDPOINTS</span> REST API</div>
+
+  <div class="file">
+    <span class="file-name" style="color:var(--base02)">GET /api/games?date=</span>
+    <span class="file-desc">Games for a date with scores, spreads, PIT stats for both teams. Powers the Dashboard.</span>
+  </div>
+  <div class="file">
+    <span class="file-name" style="color:var(--base02)">GET /api/games/{id}/line-movement</span>
+    <span class="file-desc">Spread line movement from odds_history for a specific game. Chart data.</span>
+  </div>
+  <div class="file">
+    <span class="file-name" style="color:var(--base02)">GET /api/espn/scoreboard?date=</span>
+    <span class="file-desc">Proxies ESPN live scoreboard. Frontend polls every 30s for live score updates.</span>
+  </div>
+  <div class="file">
+    <span class="file-name" style="color:var(--base02)">GET /api/strategy/summary</span>
+    <span class="file-desc">Strategy stats (N, record, ATS%, units, ROI) across all timeframes x spread buckets x venue splits. Uses GAMES_DF.</span>
+  </div>
+  <div class="file">
+    <span class="file-name" style="color:var(--base02)">GET /api/strategy/equity-curve</span>
+    <span class="file-desc">Cumulative P&amp;L curve for any strategy filter (side, venue, spread range, timeframe). Uses actual closing prices.</span>
+  </div>
+  <div class="file">
+    <span class="file-name" style="color:var(--base02)">GET /api/strategy/games</span>
+    <span class="file-desc">Game-by-game list for a strategy filter. Sorted newest-first. Shows spread, price, ATS margin, P&amp;L per bet.</span>
+  </div>
+  <div class="file">
+    <span class="file-name" style="color:var(--base02)">POST /api/backtest</span>
+    <span class="file-desc">Custom backtester -- stackable filters on PIT stats (absolute, vs opponent, by margin, by percentile rank). Returns record, ATS%, ROI, p-value, CI, equity curve.</span>
+  </div>
+  <div class="file">
+    <span class="file-name" style="color:var(--base02)">GET /api/dates, /api/teams, /api/stats</span>
+    <span class="file-desc">Metadata endpoints for available dates, team list, and backtestable stat names.</span>
+  </div>
+</div>
+
+<!-- ================================================================= -->
+<h2>3 -- FRONTEND (React + TypeScript + Vite on port 5174)</h2>
+<!-- ================================================================= -->
+
+<div class="phase">
+  <div class="phase-title"><span class="phase-num">SHELL</span> App Structure</div>
+  <div class="file">
+    <span class="file-name component">src/main.tsx</span>
+    <span class="file-desc">React entry point. Renders App into #root.</span>
+  </div>
+  <div class="file">
+    <span class="file-name component">src/App.tsx</span>
+    <span class="file-desc">Header with tab navigation (Dashboard | Strategy | Backtester). Exports API_HOST for dynamic backend URL.</span>
+  </div>
+  <div class="file">
+    <span class="file-name component">src/index.css</span>
+    <span class="file-desc">Solarized Light theme. Monospace fonts. Terminal aesthetic (no border-radius).</span>
+  </div>
+</div>
+
+<div class="arrow-down">|</div>
+
+<div class="phase">
+  <div class="phase-title"><span class="phase-num">TAB 1</span> Dashboard -- GameDashboard.tsx</div>
+  <div class="file">
+    <span class="file-name component">GameDashboard.tsx</span>
+    <span class="file-desc">Date picker with prev/next/today. Fetches /api/games for historical data.</span>
+  </div>
+  <div class="note"><b>Game cards:</b> Team scores, opening/closing spread, moneyline, ATS result (COVERED/MISSED). Click to expand -> stat comparison table (Win%, ATS%, PPG, 3PT%, FT%, Def 2P%, OREB, TO, Pace, SOS) with color-coded edge column.</div>
+  <div class="note"><b>Line movement chart:</b> Embedded lightweight-charts mini-chart per game from /api/games/{id}/line-movement</div>
+  <div class="note"><b>ESPN Live:</b> Toggle to show ESPN scoreboard. Polls /api/espn/scoreboard every 30 seconds. Red pulsing dot on live games.</div>
+</div>
+
+<div class="phase">
+  <div class="phase-title"><span class="phase-num">TAB 2</span> Strategy -- StrategySummary.tsx</div>
+  <div class="file">
+    <span class="file-name component">StrategySummary.tsx</span>
+    <span class="file-desc">Fetches /api/strategy/summary on mount. Timeframe pill selector.</span>
+  </div>
+  <div class="note"><b>Equity curve:</b> Single lightweight-charts panel. Defaults to All Favorites. Updates when any strategy row is clicked via /api/strategy/equity-curve with matching filter params.</div>
+  <div class="note"><b>All Games table:</b> Favorites (total + 4 spread buckets: 0.5-2.5, 3-5.5, 6-9.5, 10+) then Underdogs (same buckets). Columns: Strategy, Games, Record, ATS%, Units, ROI, Profitable.</div>
+  <div class="note"><b>Home/Away/Neutral table:</b> Same bucket structure per venue type (Home Fav, Home Dog, Away Fav, Away Dog, Neutral Fav, Neutral Dog).</div>
+  <div class="note"><b>Game drill-down:</b> Click any strategy row -> fetches /api/strategy/games -> sortable game list with Date, Favorite, Underdog, Score, Spread, Price, ATS Margin, W/L, P&amp;L, Cumulative P&amp;L.</div>
+</div>
+
+<div class="phase">
+  <div class="phase-title"><span class="phase-num">TAB 3</span> Backtester -- Backtester.tsx</div>
+  <div class="file">
+    <span class="file-name component">Backtester.tsx</span>
+    <span class="file-desc">Filter builder UI. Posts to /api/backtest.</span>
+  </div>
+  <div class="note"><b>Side filter:</b> All / Favorites / Underdogs / Home / Away</div>
+  <div class="note"><b>Min games:</b> Minimum games played filter</div>
+  <div class="note"><b>Stackable conditions:</b> Stat > value, Stat > opponent, Stat > opp by margin, Team/Opp rank > percentile. Multiple conditions AND'd together.</div>
+  <div class="note"><b>Results:</b> Games, Record, ATS%, ROI, p-value (binomial), 95% CI (Wilson). Equity curve chart.</div>
+</div>
+
+<!-- ================================================================= -->
+<h2>4 -- SUPPORTING TOOLS</h2>
+<!-- ================================================================= -->
+
+<div class="phase">
+  <div class="file">
+    <span class="file-name">ncaab_backtest.py</span>
+    <span class="file-desc">CLI backtester. Runs predefined strategies + differential scan. Independent of the web app -- reads parquet directly.</span>
+  </div>
+  <div class="file">
+    <span class="file-name">build_team_name_map.py</span>
+    <span class="file-desc">One-time utility. Samples ESPN + Odds API team names across 18 dates, fuzzy-matches them, outputs team_name_map.json.</span>
+  </div>
+  <div class="file">
+    <span class="file-name config-file">ecosystem.config.js</span>
+    <span class="file-desc">PM2 process manager config. Starts ncaab-frontend (Vite on 5174) and ncaab-backend (FastAPI on 8001) together.</span>
+  </div>
+</div>
+
+<!-- ================================================================= -->
+<h2>DATA FLOW SUMMARY</h2>
+<!-- ================================================================= -->
+
+<div class="phase" style="font-size: 11px; line-height: 1.8;">
+<pre style="font-family: inherit; white-space: pre-wrap;">
+ESPN API + Odds API
+       |
+       v
+ncaab_daily_builder.py  <-- ncaab_config.py (teams, names, conferences)
+       |
+       |---> ncaab_game_logs.parquet    (4K rows x 129 cols: scores, boxscore, PIT stats, odds)
+       |---> ncaab_game_logs.csv        (tracked teams only, subset of columns)
+       '---> ncaab_odds_history.parquet (2.5M rows: per-bookmaker spread/ML snapshots over time)
+                |
+                v
+       app/backend/main.py  (FastAPI, port 8001)
+           | On startup:
+           |   load parquets -> attach closing prices -> tag rounds -> build GAMES_DF
+           |
+           |-- /api/games           --> GameDashboard.tsx
+           |-- /api/espn/scoreboard --> GameDashboard.tsx (live polling)
+           |-- /api/strategy/*      --> StrategySummary.tsx
+           '-- /api/backtest        --> Backtester.tsx
+                                          |
+                                          v
+                                   app/frontend/ (React + Vite, port 5174)
+                                     App.tsx --> Dashboard | Strategy | Backtester
 </pre>
 </div>
-
-<!-- ================================================================== -->
-<h2>2. Pipeline Execution Sequence</h2>
-<!-- ================================================================== -->
-
-<div class="diagram-container">
-<pre class="mermaid">
-flowchart TD
-  START(["python ncaab_daily_builder.py"]) --> LOAD
-
-  subgraph INIT["Initialization"]
-    LOAD["Load parquet → df (3,950 rows)<br/>Set is_tracked for existing rows<br/>Load espn_team_ids.json → team_ids"]
-  end
-
-  LOAD --> P1
-
-  subgraph P1["PHASE 1 — Fetch New Games (ESPN)"]
-    direction TB
-    P1A["For each date from last_date → today:<br/>1 API call → scoreboard (all games that day)"]
-    P1B["parse_scoreboard(): filter to games<br/>involving tracked teams (68 IDs)<br/>→ team, opponent, scores, home/away,<br/>  neutral_site, conference_game,<br/>  1H scores, AP rank"]
-    P1C["backfill_game_details():<br/>fetch_game_summary() per event<br/>→ boxscore stats (FGM/FGA, 3PM/3PA,<br/>  FTM/FTA, OREB, DREB, TO)"]
-    P1A --> P1B --> P1C
-  end
-
-  P1 --> P2_DECIDE{--backfill-odds?}
-
-  P2_DECIDE -- "YES" --> P2B
-  P2_DECIDE -- "NO (daily)" --> P2D
-
-  subgraph P2B["PHASE 2 — Backfill Odds (718 snapshots)"]
-    direction TB
-    P2B1["Compute floor(commence_time) per game<br/>→ 718 unique hourly timestamps"]
-    P2B2["Fetch 718 historical odds snapshots<br/>Each contains ALL games at that moment"]
-    P2B3["Build OPENING index:<br/>iterate chronologically, record first<br/>snapshot where each game appears<br/>→ (team, commence_time) → snapshot_iso"]
-    P2B4["Assign CLOSING lines:<br/>snapshot at floor(commence_time)<br/>→ closing_fg_ml, closing_fg_spread"]
-    P2B5["Assign OPENING lines:<br/>earliest snapshot for that game<br/>→ opening_fg_ml, opening_fg_spread"]
-    P2B1 --> P2B2 --> P2B3 --> P2B4 --> P2B5
-  end
-
-  subgraph P2D["PHASE 2 — Daily Odds (new dates only)"]
-    direction TB
-    P2D1["1 snapshot per new game date<br/>(previous day ~5PM ET)"]
-    P2D2["Match team via _TEAM_NAME_MAP<br/>or ODDS_NAME_MAP → OddsAPI name"]
-    P2D3["_find_team_in_odds(): scan games<br/>_first_bookmaker_value(): extract<br/>h2h → ML, spreads → point"]
-    P2D4["Same value → opening = closing<br/>(single snapshot limitation)"]
-    P2D1 --> P2D2 --> P2D3 --> P2D4
-  end
-
-  P2B --> BF
-  P2D --> BF
-
-  subgraph BF["BACKFILL MODES (optional flags)"]
-    direction TB
-    BF1["--backfill-boxscore<br/>Re-fetch summary for rows<br/>missing team_fgm"]
-    BF2["--backfill-ranks<br/>Re-scan scoreboards for<br/>opp_ap_rank"]
-    BF3["--backfill-times<br/>Re-scan scoreboards for<br/>commence_time_utc"]
-  end
-
-  BF --> MR
-
-  subgraph MR["MIRROR + OPPONENT GAMES"]
-    direction TB
-    MR1["create_mirror_rows():<br/>For each tracked row vs non-tracked opp,<br/>create flipped row (swap team↔opp stats)<br/>is_tracked = False<br/>→ +1,646 rows"]
-    MR2{"--backfill-opponents?"}
-    MR3["phase1_fetch_opponent_games():<br/>Fetch schedule for 348 non-tourn opponents<br/>Add rows for games vs known teams<br/>Fetch boxscore for each<br/>→ +32 rows"]
-    MR1 --> MR2
-    MR2 -- "YES" --> MR3
-    MR2 -- "NO" --> SAVE1
-    MR3 --> SAVE1
-  end
-
-  SAVE1["💾 save_game_logs(df)<br/>Coerce types, drop orphan cols<br/>→ parquet"]
-
-  SAVE1 --> P3
-
-  subgraph P3["PHASE 3 — Compute PIT Stats (zero API calls)"]
-    direction TB
-    P3A["For each unique team in df (416 teams):<br/>Sort rows by date"]
-    P3B["Walk game-by-game, accumulate counters BEFORE each game:"]
-    P3C["<b>Records:</b> games + win_pct<br/>(overall, home, neutral, away)<br/><b>ATS:</b> ats_games + ats_win_pct<br/>(overall, home, neutral, away)<br/><b>PPG:</b> points per game<br/>(overall, home, neutral, away)"]
-    P3D["<b>Shooting:</b> FT/3PT/2PT made, attempted, pct per game<br/><b>Defense:</b> opponent FT/3PT/2PT allowed per game<br/><b>Rebounds:</b> OREB + DREB per game<br/><b>Turnovers:</b> own TO + forced TO per game<br/><b>Pace:</b> FGA − OREB + TO + 0.475×FTA per game<br/><b>SOS:</b> avg opp AP rank (unranked = 100)"]
-    P3E["Write team PIT → team_* columns<br/>Look up opponent PIT by opponent_id<br/>→ opp_* columns (now filled for all!)"]
-    P3A --> P3B --> P3C --> P3D --> P3E
-  end
-
-  P3 --> P4
-
-  subgraph P4["PHASE 4 — Export CSV"]
-    P4A["Filter df to is_tracked == True<br/>(2,272 tournament rows only)"]
-    P4B["Select 102 columns, rename headers"]
-    P4C["Write ncaab_game_logs.csv"]
-    P4A --> P4B --> P4C
-  end
-
-  P4 --> SAVE2["💾 save_game_logs(df)<br/>Final save with PIT columns<br/>→ parquet"]
-  SAVE2 --> DONE(["DONE"])
-
-  style P1 fill:#0d2818,stroke:#238636
-  style P2B fill:#2a1800,stroke:#d29922
-  style P2D fill:#2a1800,stroke:#d29922
-  style P3 fill:#0d1b2a,stroke:#388bfd
-  style P4 fill:#2a0d1e,stroke:#db61a2
-  style BF fill:#1a1a0d,stroke:#8b8000
-  style MR fill:#1a0d2a,stroke:#8b6fcf
-  style SAVE1 fill:#21262d,stroke:#484f58
-  style SAVE2 fill:#21262d,stroke:#484f58
-</pre>
-</div>
-
-<!-- ================================================================== -->
-<h2>3. Column Architecture (127 total in parquet)</h2>
-<!-- ================================================================== -->
-
-<h3><span class="phase-badge p1">Phase 1</span> RAW_COLUMNS (30 columns) — from ESPN</h3>
-<table class="col-table">
-<tr><th>Column</th><th>Type</th><th>Source</th><th>Description</th></tr>
-<tr><td>team</td><td>str</td><td>Canonical name</td><td>Tournament team name (tracked) or ESPN display name (support rows)</td></tr>
-<tr><td>date</td><td>str</td><td>Scoreboard</td><td>Game date YYYY-MM-DD (ET timezone)</td></tr>
-<tr><td>event_id</td><td>str</td><td>Scoreboard</td><td>ESPN event ID (unique per game)</td></tr>
-<tr><td>commence_time_utc</td><td>str</td><td>Scoreboard</td><td>ISO timestamp of game start</td></tr>
-<tr><td>opponent</td><td>str</td><td>Scoreboard</td><td>ESPN displayName of opponent</td></tr>
-<tr><td>opponent_short</td><td>str</td><td>Scoreboard</td><td>ESPN shortDisplayName of opponent</td></tr>
-<tr><td>opponent_id</td><td>str</td><td>Scoreboard</td><td>ESPN team ID of opponent</td></tr>
-<tr><td>home_away</td><td>str</td><td>Scoreboard</td><td>"home", "away", or "neutral"</td></tr>
-<tr><td>neutral_site</td><td>bool</td><td>Scoreboard</td><td>True if neutral site game</td></tr>
-<tr><td>conference_game</td><td>bool</td><td>Derived</td><td>Both teams in same conference (CONFERENCE_MAP)</td></tr>
-<tr><td>team_score, opp_score</td><td>int</td><td>Scoreboard</td><td>Final scores</td></tr>
-<tr><td>win_loss</td><td>str</td><td>Derived</td><td>"W", "L", or "T"</td></tr>
-<tr><td>team_1h, opp_1h</td><td>Int64</td><td>Summary</td><td>First half scores</td></tr>
-<tr><td>team_fgm..team_to</td><td>Int64</td><td>Summary</td><td>9 boxscore stats: FGM, FGA, 3PM, 3PA, FTM, FTA, OREB, DREB, TO</td></tr>
-<tr><td>opp_fgm..opp_to</td><td>Int64</td><td>Summary</td><td>9 opponent boxscore stats (same set)</td></tr>
-<tr><td>opp_ap_rank</td><td>Int64</td><td>Scoreboard</td><td>Opponent's AP rank at game time (None = unranked)</td></tr>
-<tr><td>is_tracked</td><td>bool</td><td>Derived</td><td>True = 68 tournament teams, False = support rows</td></tr>
-</table>
-
-<h3><span class="phase-badge p2">Phase 2</span> ODDS_COLUMNS (4 columns) — from The Odds API</h3>
-<table class="col-table">
-<tr><th>Column</th><th>Type</th><th>Source</th><th>Description</th></tr>
-<tr><td>opening_fg_ml</td><td>float</td><td>Earliest snapshot</td><td>Opening moneyline (first time game appeared in odds)</td></tr>
-<tr><td>closing_fg_ml</td><td>float</td><td>floor(commence) snapshot</td><td>Closing moneyline (snapshot right before tipoff)</td></tr>
-<tr><td>opening_fg_spread</td><td>float</td><td>Earliest snapshot</td><td>Opening point spread (negative = favored)</td></tr>
-<tr><td>closing_fg_spread</td><td>float</td><td>floor(commence) snapshot</td><td>Closing point spread</td></tr>
-</table>
-
-<h3><span class="phase-badge p3">Phase 3</span> PIT_COLUMNS (93 columns) — Computed, Zero API</h3>
-
-<div class="note">
-  All PIT stats are <b>Point-In-Time</b>: they reflect the team's performance <b>PRIOR</b> to each game (not including that game).
-  Computed for all 416 teams in the dataframe, enabling opponent PIT lookup for every row.
-</div>
-
-<table class="col-table">
-<tr><th>Category</th><th>Columns (team_ + opp_ prefixes)</th><th>Formula</th></tr>
-<tr><td>Record</td><td>games, win_pct<br/>home_games, home_win_pct<br/>neutral_games, neutral_win_pct<br/>away_games, away_win_pct</td><td>games = W + L<br/>win_pct = W / (W + L) rounded to .001</td></tr>
-<tr><td>ATS</td><td>ats_games, ats_win_pct<br/>home_ats_games, home_ats_win_pct<br/>neutral_ats_games, neutral_ats_win_pct<br/>away_ats_games, away_ats_win_pct</td><td>ATS win = margin + spread > 0<br/>ats_win_pct = covers / (covers + misses + pushes)</td></tr>
-<tr><td>PPG</td><td>ppg, home_ppg, neutral_ppg, away_ppg</td><td>total_points / games</td></tr>
-<tr><td>Shooting<br/>(Offense)</td><td>ftm_pg, fta_pg, ft_pct<br/>3pm_pg, 3pa_pg, 3pt_pct<br/>2pm_pg, 2pa_pg, 2pt_pct</td><td>per game = total / boxscore_games<br/>pct = made / attempted × 100</td></tr>
-<tr><td>Shooting<br/>(Defense)</td><td>def_ftm_pg, def_fta_pg, def_ft_pct<br/>def_3pm_pg, def_3pa_pg, def_3pt_pct<br/>def_2pm_pg, def_2pa_pg, def_2pt_pct</td><td>Same formulas, using opponent's stats<br/>(what you <i>allow</i>)</td></tr>
-<tr><td>Rebounds</td><td>oreb_pg, dreb_pg</td><td>total / boxscore_games</td></tr>
-<tr><td>Turnovers</td><td>to_pg, forced_to_pg</td><td>to_pg = own turnovers / games<br/>forced_to_pg = opponent turnovers / games</td></tr>
-<tr><td>Pace</td><td>pace</td><td>(FGA − OREB + TO + 0.475 × FTA) / games<br/><small>Estimates possessions per game</small></td></tr>
-<tr><td>SOS</td><td>sos</td><td>avg(opp_ap_rank), unranked = 100<br/><small>Lower = tougher schedule</small></td></tr>
-</table>
-
-<!-- ================================================================== -->
-<h2>4. Key Functions & Call Graph</h2>
-<!-- ================================================================== -->
-
-<div class="diagram-container">
-<pre class="mermaid">
-flowchart LR
-  subgraph main["main()"]
-    direction TB
-    m1["get_team_ids()"]
-    m2["load_game_logs()"]
-    m3["phase1_fetch_games()"]
-    m4["phase2_backfill_odds()<br/>or phase2_fetch_odds()"]
-    m5["backfill_boxscore_data()"]
-    m6["backfill_ap_ranks()"]
-    m7["backfill_commence_times()"]
-    m8["create_mirror_rows()"]
-    m9["phase1_fetch_opponent_games()"]
-    m10["save_game_logs()"]
-    m11["phase3_compute_pit()"]
-    m12["phase4_export_csv()"]
-    m13["save_game_logs()"]
-    m1 --> m2 --> m3 --> m4 --> m5 --> m6 --> m7 --> m8 --> m9 --> m10 --> m11 --> m12 --> m13
-  end
-
-  subgraph helpers["Helper Functions"]
-    direction TB
-    h1["api_get() — HTTP GET + retry + rate limit"]
-    h2["fetch_scoreboard() — ESPN scoreboard for 1 date"]
-    h3["parse_scoreboard() — extract game rows"]
-    h4["fetch_game_summary() — ESPN boxscore for 1 event"]
-    h5["backfill_game_details() — fill half scores + boxscore"]
-    h6["_find_team_in_odds() — match team in snapshot"]
-    h7["_first_bookmaker_value() — extract ML or spread"]
-    h8["fetch_odds_snapshot() — 1 historical odds call"]
-    h9["_load_team_name_map() → _TEAM_NAME_MAP"]
-  end
-
-  m3 --> h2
-  m3 --> h3
-  m3 --> h5
-  h5 --> h4
-  h2 --> h1
-  h4 --> h1
-  h8 --> h1
-  m4 --> h8
-  m4 --> h6
-  m4 --> h7
-  m9 --> h1
-  m9 --> h4
-
-  style main fill:#0d1117,stroke:#30363d
-  style helpers fill:#0d1117,stroke:#30363d
-</pre>
-</div>
-
-<!-- ================================================================== -->
-<h2>5. CLI Entry Points</h2>
-<!-- ================================================================== -->
-
-<table class="col-table">
-<tr><th>Command</th><th>What It Does</th><th>API Calls</th></tr>
-<tr><td>python ncaab_daily_builder.py</td><td>Daily run: fetch new games, daily odds (1 snapshot/date), mirror rows, recompute PIT, export CSV</td><td>1 scoreboard + 1 summary per new game + 1 odds per new date</td></tr>
-<tr><td>--backfill-odds</td><td>True opening/closing lines: 1 snapshot per unique commence hour</td><td>~718 Odds API calls (~14,360 credits)</td></tr>
-<tr><td>--backfill-opponents</td><td>Fetch full schedules for non-tournament opponents + boxscores</td><td>~348 schedule + ~32 summary (ESPN, free)</td></tr>
-<tr><td>--backfill-boxscore</td><td>Re-fetch summary for rows missing boxscore stats</td><td>1 ESPN call per event missing data</td></tr>
-<tr><td>--backfill-ranks</td><td>Re-scan scoreboards to fill AP ranks</td><td>1 ESPN call per date with missing ranks</td></tr>
-<tr><td>--backfill-times</td><td>Backfill commence_time_utc for existing rows</td><td>1 ESPN call per date with missing times</td></tr>
-</table>
-
-<!-- ================================================================== -->
-<h2>6. Data Flow: How a Single Game Becomes a Row</h2>
-<!-- ================================================================== -->
-
-<div class="diagram-container">
-<pre class="mermaid">
-sequenceDiagram
-  participant M as main()
-  participant ESPN as ESPN API
-  participant ODDS as Odds API
-  participant PQ as Parquet
-  participant CSV as CSV
-
-  Note over M: Phase 1
-  M->>ESPN: GET /scoreboard?dates=20260319
-  ESPN-->>M: events[] (all games that day)
-  M->>M: parse_scoreboard() → filter to tracked teams
-  M->>ESPN: GET /summary?event=401234567
-  ESPN-->>M: boxscore: FGM, FGA, 3PM, 3PA, FTM, FTA, OREB, DREB, TO
-  M->>M: Append row with 30 RAW columns
-
-  Note over M: Phase 2 (daily)
-  M->>ODDS: GET /historical/odds?date=2026-03-18T22:00:00Z
-  ODDS-->>M: All NCAAB lines at that moment
-  M->>M: Match team via _TEAM_NAME_MAP
-  M->>M: Extract h2h→ML, spreads→point from first bookmaker
-  M->>M: Set opening = closing (single snapshot)
-
-  Note over M: Mirror Rows
-  M->>M: For non-tracked opponents: swap team↔opp columns
-  M->>M: is_tracked = False
-
-  Note over M: Save checkpoint
-  M->>PQ: save_game_logs() → parquet (type coercion + orphan cleanup)
-
-  Note over M: Phase 3 — PIT (pure math)
-  M->>M: For each of 416 teams: walk games chronologically
-  M->>M: Accumulate W/L, points, shooting, rebounds, TOs
-  M->>M: SAVE stats BEFORE each game → entry dict
-  M->>M: After loop: write team_* and opp_* columns
-
-  Note over M: Phase 4
-  M->>M: Filter to is_tracked == True (2,272 rows)
-  M->>M: Select 102 columns, rename headers
-  M->>CSV: Write ncaab_game_logs.csv
-  M->>PQ: Final save with PIT columns
-</pre>
-</div>
-
-<!-- ================================================================== -->
-<h2>7. Where Predictions Would Plug In</h2>
-<!-- ================================================================== -->
-
-<div class="note">
-  No prediction model exists yet. The pipeline produces <b>features</b> (PIT stats, odds, boxscore) but no <b>target variable</b> or <b>model</b>.
-  A prediction phase would slot in after Phase 3 (features computed) and before/alongside Phase 4 (export).
-</div>
-
-<div class="diagram-container">
-<pre class="mermaid">
-flowchart LR
-  P3["Phase 3<br/>PIT Stats<br/>(features ready)"] --> PRED
-
-  subgraph PRED["🔮 Future: Phase 5 — Predictions"]
-    direction TB
-    T1["Define target variable:<br/>ATS_cover = margin + spread > 0"]
-    T2["Select features:<br/>team_win_pct, opp_win_pct,<br/>team_pace, opp_pace,<br/>opening vs closing spread delta,<br/>shooting differentials, etc."]
-    T3["Train model:<br/>XGBoost / LightGBM / Logistic"]
-    T4["Generate predictions:<br/>P(cover), confidence,<br/>expected margin"]
-    T1 --> T2 --> T3 --> T4
-  end
-
-  PRED --> P4["Phase 4<br/>Export CSV<br/>(+ predictions)"]
-
-  style PRED fill:#1a2a1a,stroke:#238636,stroke-dasharray: 5 5
-</pre>
-</div>
-
-<script>
-  mermaid.initialize({
-    theme: 'dark',
-    themeVariables: {
-      primaryColor: '#1f6feb',
-      primaryTextColor: '#c9d1d9',
-      primaryBorderColor: '#388bfd',
-      lineColor: '#484f58',
-      secondaryColor: '#161b22',
-      tertiaryColor: '#21262d',
-      fontSize: '14px',
-    },
-    flowchart: { htmlLabels: true, curve: 'basis' },
-    sequence: { mirrorActors: false },
-  });
-</script>
 
 </body>
 </html>

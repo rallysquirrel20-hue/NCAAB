@@ -440,8 +440,11 @@ def parse_scoreboard(
         if date_raw:
             try:
                 dt = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
-                game_date = dt.strftime("%Y-%m-%d")
-            except ValueError:
+                # Convert to US Eastern to match ESPN's scoreboard date
+                from zoneinfo import ZoneInfo
+                dt_et = dt.astimezone(ZoneInfo("America/New_York"))
+                game_date = dt_et.strftime("%Y-%m-%d")
+            except (ValueError, KeyError):
                 game_date = date_raw[:10]
 
         neutral_site = comp.get("neutralSite", False)
@@ -984,8 +987,10 @@ def phase1_fetch_opponent_games(
             if date_raw:
                 try:
                     dt = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
-                    game_date = dt.strftime("%Y-%m-%d")
-                except ValueError:
+                    from zoneinfo import ZoneInfo
+                    dt_et = dt.astimezone(ZoneInfo("America/New_York"))
+                    game_date = dt_et.strftime("%Y-%m-%d")
+                except (ValueError, KeyError):
                     game_date = date_raw[:10]
 
             opp_score_val = _extract_score(opp_c)
@@ -2000,7 +2005,12 @@ CSV_COLUMNS = {
 
 
 def rebuild_odds_history() -> None:
-    """Rebuild the flattened odds history parquet from all cached snapshots."""
+    """Append new cached snapshots to the odds history parquet.
+
+    Reads existing parquet (if any), flattens any new cache JSON files
+    that haven't been incorporated yet, and appends them.  Never drops
+    existing rows.
+    """
     if not ODDS_CACHE_DIR.exists():
         return
 
@@ -2008,20 +2018,34 @@ def rebuild_odds_history() -> None:
     if not cache_files:
         return
 
-    # Check if rebuild is needed (any new cache files since last build?)
+    # Load existing history
+    existing = pd.DataFrame()
+    existing_snapshots: set[str] = set()
     if ODDS_HISTORY_FILE.exists():
+        existing = pd.read_parquet(ODDS_HISTORY_FILE)
+        # Track which snapshot_times we already have to avoid duplicates
+        if "snapshot_time" in existing.columns:
+            existing_snapshots = set(existing["snapshot_time"].unique())
+
+    # Check if any cache file is newer than the parquet
+    if ODDS_HISTORY_FILE.exists() and len(existing) > 0:
         history_mtime = ODDS_HISTORY_FILE.stat().st_mtime
         newest_cache = max(f.stat().st_mtime for f in cache_files)
         if newest_cache <= history_mtime:
             print(f"[{_now_str()}] Odds history: up to date "
-                  f"({len(cache_files)} snapshots)")
+                  f"({len(existing):,} rows)")
             return
 
-    all_rows: list[dict] = []
+    new_rows: list[dict] = []
+    new_snap_count = 0
     for f in cache_files:
         with open(f, "r") as fh:
             data = json.load(fh)
         snapshot_time = data.get("timestamp", "")
+        # Skip snapshots we already have
+        if snapshot_time in existing_snapshots:
+            continue
+        new_snap_count += 1
         for game in data.get("data", []):
             game_id = game.get("id", "")
             commence_time = game.get("commence_time", "")
@@ -2033,7 +2057,7 @@ def rebuild_odds_history() -> None:
                 for mkt in bm.get("markets", []):
                     market = mkt.get("key", "")
                     for oc in mkt.get("outcomes", []):
-                        all_rows.append({
+                        new_rows.append({
                             "snapshot_time": snapshot_time,
                             "game_id": game_id,
                             "commence_time": commence_time,
@@ -2047,11 +2071,20 @@ def rebuild_odds_history() -> None:
                             "point": oc.get("point"),
                         })
 
-    df = pd.DataFrame(all_rows)
-    df.to_parquet(ODDS_HISTORY_FILE, index=False, engine="pyarrow")
-    snap_count = len(cache_files)
-    print(f"[{_now_str()}] Odds history: rebuilt from {snap_count} snapshots "
-          f"({len(df):,} rows, {ODDS_HISTORY_FILE.stat().st_size // 1024}KB)")
+    if not new_rows:
+        print(f"[{_now_str()}] Odds history: up to date "
+              f"({len(existing):,} rows)")
+        return
+
+    new_df = pd.DataFrame(new_rows)
+    if len(existing) > 0:
+        merged = pd.concat([existing, new_df], ignore_index=True)
+    else:
+        merged = new_df
+    merged.to_parquet(ODDS_HISTORY_FILE, index=False, engine="pyarrow")
+    print(f"[{_now_str()}] Odds history: appended {new_snap_count} new snapshots "
+          f"({len(new_rows):,} new rows, {len(merged):,} total, "
+          f"{ODDS_HISTORY_FILE.stat().st_size // 1024}KB)")
 
 
 def phase4_export_csv(df: pd.DataFrame) -> None:

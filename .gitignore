@@ -2,3 +2,6 @@
 __pycache__/
 ncaab_cache.json
 odds_cache/
+node_modules/
+dist/
+app/backend/venv/
