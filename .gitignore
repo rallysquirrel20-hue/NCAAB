@@ -2,6 +2,7 @@
 __pycache__/
 ncaab_cache.json
 odds_cache/
+ncaab_today.json
 node_modules/
 dist/
 app/backend/venv/
