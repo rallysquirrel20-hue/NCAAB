@@ -240,6 +240,22 @@ const OPP_COLUMNS = [
     { col: 'opp_pace', label: 'Opp Pace' },
     { col: 'opp_sos', label: 'Opp SOS' },
   ]},
+  { group: 'Ranks', cols: [
+    { col: 'rank_opp_win_pct', label: 'Opp Win % Rank' },
+    { col: 'rank_opp_ats_win_pct', label: 'Opp ATS % Rank' },
+    { col: 'rank_opp_ppg', label: 'Opp PPG Rank' },
+    { col: 'rank_opp_ft_pct', label: 'Opp FT % Rank' },
+    { col: 'rank_opp_3pt_pct', label: 'Opp 3PT % Rank' },
+    { col: 'rank_opp_2pt_pct', label: 'Opp 2PT % Rank' },
+    { col: 'rank_opp_def_3pt_pct', label: 'Opp Def 3PT % Rank' },
+    { col: 'rank_opp_def_2pt_pct', label: 'Opp Def 2PT % Rank' },
+    { col: 'rank_opp_oreb_pg', label: 'Opp OREB/G Rank' },
+    { col: 'rank_opp_dreb_pg', label: 'Opp DREB/G Rank' },
+    { col: 'rank_opp_to_pg', label: 'Opp TO/G Rank' },
+    { col: 'rank_opp_forced_to_pg', label: 'Opp Forced TO/G Rank' },
+    { col: 'rank_opp_pace', label: 'Opp Pace Rank' },
+    { col: 'rank_opp_sos', label: 'Opp SOS Rank' },
+  ]},
 ]
 
 // Keep old name as alias for the click handler
@@ -273,20 +289,32 @@ function MatchupTable({ gameId, onStatClick }: { gameId: string; onStatClick?: (
   const homeRanks: Record<string, number> = home.ranks || {}
   const awayRanks: Record<string, number> = away.ranks || {}
 
-  const handleStatClick = (key: string, value: any, higherBetter: boolean, label: string) => {
-    if (value == null || !onStatClick) return
-    const vsPair = STAT_VS_PAIRS[key]
-    if (vsPair) {
-      // Column-vs-column: e.g., team_3pt_pct > opp_def_3pt_pct by 0+
-      const op = higherBetter ? '>' : '<'
-      onStatClick(key, op, '0', label, vsPair)
+  const handleStatClick = (key: string, teamVal: any, _higherBetter: boolean, label: string, side: 'home' | 'away') => {
+    if (teamVal == null || !onStatClick) return
+    const oppSide = side === 'home' ? away : home
+    // Always compare the same stat: team_X vs opp_X
+    const oppKey = key.replace('team_', 'opp_')
+    const teamNum = typeof teamVal === 'number' ? teamVal : parseFloat(teamVal)
+    const oppVal = oppSide[key] // opponent's same stat (their team_X is our opp_X)
+    const oppNum = typeof oppVal === 'number' ? oppVal : parseFloat(oppVal)
+    if (!isNaN(teamNum) && !isNaN(oppNum)) {
+      const op = teamNum >= oppNum ? '>' : '<'
+      onStatClick(key, op, '0', label, oppKey)
     } else {
-      // Fallback: fixed value filter
-      const numVal = typeof value === 'number' ? value : parseFloat(value)
-      if (isNaN(numVal)) return
-      const op = higherBetter ? '>=' : '<='
-      onStatClick(key, op, numVal.toString(), label)
+      const op = _higherBetter ? '>=' : '<='
+      onStatClick(key, op, teamNum.toString(), label)
     }
+  }
+
+  const handleRankClick = (key: string, rank: number, label: string, side: 'home' | 'away') => {
+    if (!onStatClick) return
+    const rankCol = `rank_${key}`
+    const oppRankCol = rankCol.replace('rank_team_', 'rank_opp_')
+    const oppRanks = side === 'home' ? awayRanks : homeRanks
+    const oppRank = oppRanks[key]
+    // Lower rank = better, so set direction based on actual values
+    const op = (oppRank != null && rank <= oppRank) ? '<' : '>'
+    onStatClick(rankCol, op, '0', `${label} Rank`, oppRankCol)
   }
 
   return (
@@ -328,12 +356,20 @@ function MatchupTable({ gameId, onStatClick }: { gameId: string; onStatClick?: (
           const aRank = awayRanks[key]
           const hRank = homeRanks[key]
 
+          const rankClickable = onStatClick && aRank != null ? ' stat-clickable' : ''
+
           return (
             <tr key={key}>
-              <td className="mu-rank">{aRank != null ? `#${aRank}` : ''}</td>
+              <td
+                className={'mu-rank' + rankClickable}
+                onClick={() => aRank != null && handleRankClick(key, aRank, label, 'away')}
+                title={onStatClick && aRank != null ? `Click to add ${label} Rank filter` : undefined}
+              >
+                {aRank != null ? `#${aRank}` : ''}
+              </td>
               <td
                 className={'mu-val ' + aClass + clickable}
-                onClick={() => handleStatClick(key, aVal, higherBetter, label)}
+                onClick={() => handleStatClick(key, aVal, higherBetter, label, 'away')}
                 title={onStatClick && aVal != null ? `Click to add ${label} filter` : undefined}
               >
                 {fmt(aVal)}
@@ -341,12 +377,18 @@ function MatchupTable({ gameId, onStatClick }: { gameId: string; onStatClick?: (
               <td className="mu-label">{label}</td>
               <td
                 className={'mu-val ' + hClass + clickable}
-                onClick={() => handleStatClick(key, hVal, higherBetter, label)}
+                onClick={() => handleStatClick(key, hVal, higherBetter, label, 'home')}
                 title={onStatClick && hVal != null ? `Click to add ${label} filter` : undefined}
               >
                 {fmt(hVal)}
               </td>
-              <td className="mu-rank">{hRank != null ? `#${hRank}` : ''}</td>
+              <td
+                className={'mu-rank' + (onStatClick && hRank != null ? ' stat-clickable' : '')}
+                onClick={() => hRank != null && handleRankClick(key, hRank, label, 'home')}
+                title={onStatClick && hRank != null ? `Click to add ${label} Rank filter` : undefined}
+              >
+                {hRank != null ? `#${hRank}` : ''}
+              </td>
             </tr>
           )
         })}
@@ -360,7 +402,7 @@ function MatchupTable({ gameId, onStatClick }: { gameId: string; onStatClick?: (
 // ============================================================================
 
 function GameBacktest({ game }: { game: Game }) {
-  const [team, setTeam] = useState<string>(game.home.name)
+  const [team, setTeam] = useState<string>('')
   const [filters, setFilters] = useState<Filter[]>([])
   const [columns, setColumns] = useState<ColumnGroups>({})
   const [result, setResult] = useState<BacktestResult | null>(null)
@@ -402,7 +444,7 @@ function GameBacktest({ game }: { game: Game }) {
     })
       .then(r => {
         setResult(r.data.result)
-        setGames(r.data.games || [])
+        setGames((r.data.games || []).sort((a: BacktestGame, b: BacktestGame) => b.date.localeCompare(a.date)))
         setPnl(r.data.pnl || [])
       })
       .finally(() => setLoading(false))
@@ -410,10 +452,13 @@ function GameBacktest({ game }: { game: Game }) {
 
   return (
     <div className="game-backtest">
-      <div className="section-header">Matchup Stats (click a value to add filter)</div>
-      <MatchupTable gameId={game.game_id} onStatClick={addStatFilter} />
+      <div className="detail-panel">
+        <div className="section-header">Matchup Stats (click a value to add filter)</div>
+        <MatchupTable gameId={game.game_id} onStatClick={addStatFilter} />
+      </div>
 
-      <div className="section-header" style={{ marginTop: 16 }}>Quick Backtest</div>
+      <div className="detail-panel">
+        <div className="section-header">Quick Backtest</div>
 
       <div className="game-bt-controls">
         <div className="team-toggle">
@@ -439,15 +484,20 @@ function GameBacktest({ game }: { game: Game }) {
 
         {filters.length > 0 && (
           <div className="game-bt-filters">
-            {filters.map((f, i) => (
+            {filters.map((f, i) => {
+              const isSideFilter = ['is_favorite', 'is_underdog', 'is_home', 'is_away', 'is_neutral', 'is_conference'].includes(f.stat)
+              return (
               <div key={i} className="filter-row">
                 <select value={f.stat} onChange={e => {
                   const next = [...filters]
-                  next[i] = { ...next[i], stat: e.target.value }
-                  // Auto-set compare_col if pairing exists
-                  const pair = STAT_VS_PAIRS[e.target.value]
-                  if (pair && next[i].compare_col) {
-                    next[i].compare_col = pair
+                  const newStat = e.target.value
+                  const isSide = ['is_favorite', 'is_underdog', 'is_home', 'is_away', 'is_neutral', 'is_conference'].includes(newStat)
+                  if (isSide) {
+                    next[i] = { ...next[i], stat: newStat, op: '==', value: '1', compare_col: undefined }
+                  } else {
+                    next[i] = { ...next[i], stat: newStat }
+                    const pair = STAT_VS_PAIRS[newStat]
+                    if (pair && next[i].compare_col) next[i].compare_col = pair
                   }
                   setFilters(next)
                 }}>
@@ -458,56 +508,62 @@ function GameBacktest({ game }: { game: Game }) {
                     </optgroup>
                   ))}
                 </select>
-                <select className="op" value={f.op} onChange={e => updateFilter(i, 'op', e.target.value)}>
-                  <option value=">">{'>'}</option>
-                  <option value=">=">{'>='}</option>
-                  <option value="<">{'<'}</option>
-                  <option value="<=">{'<='}</option>
-                  <option value="==">{'=='}</option>
-                  <option value="!=">{'!='}</option>
-                </select>
-                {f.compare_col ? (
-                  <>
-                    <VsCompareSelect value={f.compare_col!} onChange={v => {
-                      const next = [...filters]
-                      next[i] = { ...next[i], compare_col: v }
-                      setFilters(next)
-                    }} />
-                    <span className="vs-label">+</span>
-                    <input
-                      value={f.value}
-                      onChange={e => updateFilter(i, 'value', e.target.value)}
-                      placeholder="diff"
-                      title="Minimum differential (0 = just beat it)"
-                      onKeyDown={e => e.key === 'Enter' && runBacktest()}
-                      style={{ width: 40 }}
-                    />
-                    <button className="btn btn-sm" title="Switch to fixed value" onClick={() => {
-                      const next = [...filters]
-                      next[i] = { ...next[i], compare_col: undefined, value: '' }
-                      setFilters(next)
-                    }}>val</button>
-                  </>
+                {isSideFilter ? (
+                  <span className="vs-label" style={{ padding: '0 8px' }}>= Yes</span>
                 ) : (
                   <>
-                    <input
-                      value={f.value}
-                      onChange={e => updateFilter(i, 'value', e.target.value)}
-                      placeholder="value"
-                      onKeyDown={e => e.key === 'Enter' && runBacktest()}
-                    />
-                    {STAT_VS_PAIRS[f.stat] && (
-                      <button className="btn btn-sm" title={`Compare vs ${STAT_VS_PAIRS[f.stat]}`} onClick={() => {
-                        const next = [...filters]
-                        next[i] = { ...next[i], compare_col: STAT_VS_PAIRS[f.stat], value: '0' }
-                        setFilters(next)
-                      }}>vs</button>
+                    <select className="op" value={f.op} onChange={e => updateFilter(i, 'op', e.target.value)}>
+                      <option value=">">{'>'}</option>
+                      <option value=">=">{'>='}</option>
+                      <option value="<">{'<'}</option>
+                      <option value="<=">{'<='}</option>
+                      <option value="==">{'=='}</option>
+                      <option value="!=">{'!='}</option>
+                    </select>
+                    {f.compare_col ? (
+                      <>
+                        <VsCompareSelect value={f.compare_col!} onChange={v => {
+                          const next = [...filters]
+                          next[i] = { ...next[i], compare_col: v }
+                          setFilters(next)
+                        }} />
+                        <span className="vs-label">+</span>
+                        <input
+                          value={f.value}
+                          onChange={e => updateFilter(i, 'value', e.target.value)}
+                          placeholder="diff"
+                          title="Minimum differential (0 = just beat it)"
+                          onKeyDown={e => e.key === 'Enter' && runBacktest()}
+                          style={{ width: 40 }}
+                        />
+                        <button className="btn btn-sm" title="Switch to fixed value" onClick={() => {
+                          const next = [...filters]
+                          next[i] = { ...next[i], compare_col: undefined, value: '' }
+                          setFilters(next)
+                        }}>val</button>
+                      </>
+                    ) : (
+                      <>
+                        <input
+                          value={f.value}
+                          onChange={e => updateFilter(i, 'value', e.target.value)}
+                          placeholder="value"
+                          onKeyDown={e => e.key === 'Enter' && runBacktest()}
+                        />
+                        <button className="btn btn-sm" title="Compare vs opponent stat" onClick={() => {
+                          const pair = STAT_VS_PAIRS[f.stat] || f.stat.replace('team_', 'opp_')
+                          const next = [...filters]
+                          next[i] = { ...next[i], compare_col: pair, value: '0' }
+                          setFilters(next)
+                        }}>vs</button>
+                      </>
                     )}
                   </>
                 )}
                 <button className="btn btn-sm btn-danger" onClick={() => removeFilter(i)}>x</button>
               </div>
-            ))}
+              )
+            })}
           </div>
         )}
 
@@ -566,44 +622,45 @@ function GameBacktest({ game }: { game: Game }) {
               {pnl.length > 0 && <PnLChart data={pnl} />}
 
               {games.length > 0 && (
-                <details className="games-details">
-                  <summary className="section-header games-summary">
-                    Games ({games.length}) — click to expand
-                  </summary>
-                  <table className="games-table">
-                    <thead>
-                      <tr>
-                        <th>Date</th>
-                        <th>Team</th>
-                        <th>Opp</th>
-                        <th>Spread</th>
-                        <th>Score</th>
-                        <th>ATS</th>
-                        <th>Result</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {games.map((g, i) => (
-                        <tr key={i}>
-                          <td>{g.date}</td>
-                          <td>{g.team}</td>
-                          <td>{g.opponent}</td>
-                          <td>{formatSpread(g.spread)}</td>
-                          <td>{g.team_score}-{g.opp_score}</td>
-                          <td>{g.ats_margin > 0 ? '+' : ''}{g.ats_margin.toFixed(1)}</td>
-                          <td className={g.covered ? 'covered' : 'missed'}>
-                            {g.covered ? 'COVER' : 'MISS'}
-                          </td>
+                <div className="detail-panel">
+                  <div className="section-header">Games ({games.length})</div>
+                  <div className="scrollable-table">
+                    <table className="games-table">
+                      <thead>
+                        <tr>
+                          <th>Date</th>
+                          <th>Team</th>
+                          <th>Opp</th>
+                          <th>Spread</th>
+                          <th>Score</th>
+                          <th>ATS</th>
+                          <th>Result</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </details>
+                      </thead>
+                      <tbody>
+                        {games.map((g, i) => (
+                          <tr key={i}>
+                            <td>{g.date}</td>
+                            <td>{g.team}</td>
+                            <td>{g.opponent}</td>
+                            <td>{formatSpread(g.spread)}</td>
+                            <td>{g.team_score}-{g.opp_score}</td>
+                            <td>{g.ats_margin > 0 ? '+' : ''}{g.ats_margin.toFixed(1)}</td>
+                            <td className={g.covered ? 'covered' : 'missed'}>
+                              {g.covered ? 'COVER' : 'MISS'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               )}
             </>
           )}
         </div>
       )}
+      </div>
     </div>
   )
 }
@@ -612,7 +669,7 @@ function GameBacktest({ game }: { game: Game }) {
 // OddsMovementChart Component
 // ============================================================================
 
-type OddsChartView = 'spread' | 'spread_price' | 'moneyline'
+type OddsChartView = 'spread' | 'spread_price' | 'moneyline' | 'total' | 'total_price'
 
 function OddsMovementChart({ gameId }: { gameId: string }) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -629,19 +686,21 @@ function OddsMovementChart({ gameId }: { gameId: string }) {
   useEffect(() => {
     if (!containerRef.current || !oddsData || !oddsData.timeline?.length) return
 
-    const spreadData: Array<{ time: number; value: number }> = []
-    const homeSpreadPrice: Array<{ time: number; value: number }> = []
-    const awaySpreadPrice: Array<{ time: number; value: number }> = []
-    const mlHomeData: Array<{ time: number; value: number }> = []
-    const mlAwayData: Array<{ time: number; value: number }> = []
+    const series: Record<string, Array<{ time: number; value: number }>> = {
+      spread: [], homeSpreadPrice: [], awaySpreadPrice: [],
+      homeML: [], awayML: [], total: [], overPrice: [], underPrice: [],
+    }
 
     for (const snap of oddsData.timeline) {
       const t = Math.floor(new Date(snap.time).getTime() / 1000)
-      if (snap.home_spread != null) spreadData.push({ time: t, value: snap.home_spread })
-      if (snap.home_spread_price != null) homeSpreadPrice.push({ time: t, value: snap.home_spread_price })
-      if (snap.away_spread_price != null) awaySpreadPrice.push({ time: t, value: snap.away_spread_price })
-      if (snap.home_ml != null) mlHomeData.push({ time: t, value: snap.home_ml })
-      if (snap.away_ml != null) mlAwayData.push({ time: t, value: snap.away_ml })
+      if (snap.home_spread != null) series.spread.push({ time: t, value: snap.home_spread })
+      if (snap.home_spread_price != null) series.homeSpreadPrice.push({ time: t, value: snap.home_spread_price })
+      if (snap.away_spread_price != null) series.awaySpreadPrice.push({ time: t, value: snap.away_spread_price })
+      if (snap.home_ml != null) series.homeML.push({ time: t, value: snap.home_ml })
+      if (snap.away_ml != null) series.awayML.push({ time: t, value: snap.away_ml })
+      if (snap.total != null) series.total.push({ time: t, value: snap.total })
+      if (snap.over_price != null) series.overPrice.push({ time: t, value: snap.over_price })
+      if (snap.under_price != null) series.underPrice.push({ time: t, value: snap.under_price })
     }
 
     if (chartRef.current) {
@@ -668,51 +727,28 @@ function OddsMovementChart({ gameId }: { gameId: string }) {
     })
     chartRef.current = chart
 
-    if (chartView === 'spread' && spreadData.length > 0) {
-      const s = chart.addSeries(LineSeries, {
-        color: 'rgb(50, 50, 255)',
-        lineWidth: 2,
-        title: `${oddsData.home} Spread`,
-      })
-      s.setData(spreadData as any)
+    const blue = 'rgb(50, 50, 255)'
+    const pink = 'rgb(255, 50, 150)'
+
+    const addLine = (data: Array<{ time: number; value: number }>, color: string, title: string) => {
+      if (data.length === 0) return
+      const s = chart.addSeries(LineSeries, { color, lineWidth: 2, title })
+      s.setData(data as any)
     }
 
+    if (chartView === 'spread') addLine(series.spread, blue, `${oddsData.home} Spread`)
     if (chartView === 'spread_price') {
-      if (homeSpreadPrice.length > 0) {
-        const s = chart.addSeries(LineSeries, {
-          color: 'rgb(50, 50, 255)',
-          lineWidth: 2,
-          title: `${oddsData.home} Price`,
-        })
-        s.setData(homeSpreadPrice as any)
-      }
-      if (awaySpreadPrice.length > 0) {
-        const s = chart.addSeries(LineSeries, {
-          color: 'rgb(255, 50, 150)',
-          lineWidth: 2,
-          title: `${oddsData.away} Price`,
-        })
-        s.setData(awaySpreadPrice as any)
-      }
+      addLine(series.homeSpreadPrice, blue, `${oddsData.home} Spread Price`)
+      addLine(series.awaySpreadPrice, pink, `${oddsData.away} Spread Price`)
     }
-
     if (chartView === 'moneyline') {
-      if (mlHomeData.length > 0) {
-        const s = chart.addSeries(LineSeries, {
-          color: 'rgb(50, 50, 255)',
-          lineWidth: 2,
-          title: `${oddsData.home} ML`,
-        })
-        s.setData(mlHomeData as any)
-      }
-      if (mlAwayData.length > 0) {
-        const s = chart.addSeries(LineSeries, {
-          color: 'rgb(255, 50, 150)',
-          lineWidth: 2,
-          title: `${oddsData.away} ML`,
-        })
-        s.setData(mlAwayData as any)
-      }
+      addLine(series.homeML, blue, `${oddsData.home} ML`)
+      addLine(series.awayML, pink, `${oddsData.away} ML`)
+    }
+    if (chartView === 'total') addLine(series.total, blue, 'Total')
+    if (chartView === 'total_price') {
+      addLine(series.overPrice, blue, 'Over Price')
+      addLine(series.underPrice, pink, 'Under Price')
     }
 
     chart.timeScale().fitContent()
@@ -730,38 +766,60 @@ function OddsMovementChart({ gameId }: { gameId: string }) {
   }
 
   const tl = oddsData.timeline
+  const home = oddsData.home
+  const away = oddsData.away
   return (
     <div>
-      <div className="section-header">Odds Movement — {oddsData.home} vs {oddsData.away} ({oddsData.snapshot_count} snapshots)</div>
-      <div className="chart-view-toggle">
-        <button className={chartView === 'spread' ? 'active' : ''} onClick={() => setChartView('spread')}>Spread</button>
-        <button className={chartView === 'spread_price' ? 'active' : ''} onClick={() => setChartView('spread_price')}>Spread Price</button>
-        <button className={chartView === 'moneyline' ? 'active' : ''} onClick={() => setChartView('moneyline')}>Moneyline</button>
+      <div className="detail-panel">
+        <div className="section-header">Odds Movement — {home} vs {away} ({oddsData.snapshot_count} snapshots)</div>
+        <div className="chart-view-toggle">
+          <button className={chartView === 'spread' ? 'active' : ''} onClick={() => setChartView('spread')}>Spread</button>
+          <button className={chartView === 'spread_price' ? 'active' : ''} onClick={() => setChartView('spread_price')}>Spread Price</button>
+          <button className={chartView === 'moneyline' ? 'active' : ''} onClick={() => setChartView('moneyline')}>Moneyline</button>
+          <button className={chartView === 'total' ? 'active' : ''} onClick={() => setChartView('total')}>Total</button>
+          <button className={chartView === 'total_price' ? 'active' : ''} onClick={() => setChartView('total_price')}>Total Price</button>
+        </div>
+        <div ref={containerRef} className="odds-chart-container" />
       </div>
-      <div ref={containerRef} className="odds-chart-container" />
-      <div className="odds-timeline-table" style={{ maxHeight: 250, overflowY: 'auto' }}>
-        <table className="matchup-table" style={{ fontSize: 11 }}>
+      <div className="detail-panel">
+        <div className="section-header">Odds Timeline</div>
+        <div className="scrollable-table">
+        <table className="matchup-table" style={{ fontSize: 10 }}>
           <thead>
             <tr>
+              <th>Date</th>
               <th>Time</th>
               <th>Spread</th>
-              <th>{oddsData.home} ML</th>
-              <th>{oddsData.away} ML</th>
+              <th>{home} Price</th>
+              <th>{away} Price</th>
+              <th>{home} ML</th>
+              <th>{away} ML</th>
               <th>Total</th>
+              <th>Over</th>
+              <th>Under</th>
             </tr>
           </thead>
           <tbody>
-            {tl.map((s: any, i: number) => (
-              <tr key={i}>
-                <td style={{ whiteSpace: 'nowrap' }}>{new Date(s.time).toLocaleString('en-US', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })}</td>
-                <td>{s.home_spread != null ? `${formatSpread(s.home_spread)} (${formatML(s.home_spread_price)})` : '-'}</td>
-                <td className={s.home_ml != null && s.home_ml < 0 ? 'fav' : 'dog'}>{s.home_ml != null ? formatML(s.home_ml) : '-'}</td>
-                <td className={s.away_ml != null && s.away_ml < 0 ? 'fav' : 'dog'}>{s.away_ml != null ? formatML(s.away_ml) : '-'}</td>
-                <td>{s.total != null ? `${s.total} (O ${formatML(s.over_price)} / U ${formatML(s.under_price)})` : '-'}</td>
-              </tr>
-            ))}
+            {tl.map((s: any, i: number) => {
+              const dt = new Date(s.time)
+              return (
+                <tr key={i}>
+                  <td style={{ whiteSpace: 'nowrap' }}>{dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}</td>
+                  <td>{s.home_spread != null ? formatSpread(s.home_spread) : '-'}</td>
+                  <td>{s.home_spread_price != null ? formatML(s.home_spread_price) : '-'}</td>
+                  <td>{s.away_spread_price != null ? formatML(s.away_spread_price) : '-'}</td>
+                  <td className={s.home_ml != null && s.home_ml < 0 ? 'fav' : 'dog'}>{s.home_ml != null ? formatML(s.home_ml) : '-'}</td>
+                  <td className={s.away_ml != null && s.away_ml < 0 ? 'fav' : 'dog'}>{s.away_ml != null ? formatML(s.away_ml) : '-'}</td>
+                  <td>{s.total != null ? s.total : '-'}</td>
+                  <td>{s.over_price != null ? formatML(s.over_price) : '-'}</td>
+                  <td>{s.under_price != null ? formatML(s.under_price) : '-'}</td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   )
@@ -867,8 +925,12 @@ function GameCard({ game }: { game: Game }) {
       {expanded && (
         <div className="game-detail" onClick={e => e.stopPropagation()}>
           <button className="collapse-btn" onClick={e => { e.stopPropagation(); setExpanded(false) }}>collapse</button>
-          <GameBacktest game={game} />
-          <OddsMovementChart gameId={game.game_id} />
+          <div className="detail-section">
+            <GameBacktest game={game} />
+          </div>
+          <div className="detail-section">
+            <OddsMovementChart gameId={game.game_id} />
+          </div>
         </div>
       )}
     </div>
@@ -883,39 +945,110 @@ function TodayDashboard() {
   const todayStr = new Date().toISOString().slice(0, 10)
   const [selectedDate, setSelectedDate] = useState(todayStr)
   const [data, setData] = useState<TodayData | null>(null)
-  const [gameDates, setGameDates] = useState<string[]>([])
+  const [gameDates, setGameDates] = useState<Array<{date: string; games: number}>>([])
   const [loading, setLoading] = useState(true)
 
-  // Fetch list of all dates with games
+  // Fetch list of all dates with games (historical + upcoming)
   useEffect(() => {
-    axios.get(`${API_BASE}/api/dates`).then(r => setGameDates(r.data)).catch(() => {})
-  }, [])
+    Promise.all([
+      axios.get(`${API_BASE}/api/dates`).then(r => r.data as Array<{date: string; games: number}>).catch(() => []),
+      axios.get(`${API_BASE}/api/today`).then(r => {
+        const games = r.data?.games || []
+        const counts: Record<string, number> = {}
+        for (const g of games) {
+          const gd = g.game_date || (g.commence_time || g.date || '').slice(0, 10)
+          if (gd) counts[gd] = (counts[gd] || 0) + 1
+        }
+        return Object.entries(counts).map(([date, games]) => ({ date, games }))
+      }).catch(() => []),
+    ]).then(([historical, upcoming]) => {
+      const map: Record<string, number> = {}
+      for (const h of historical) map[h.date] = h.games
+      for (const u of upcoming) if (!map[u.date]) map[u.date] = u.games
+      const all = Object.entries(map).map(([date, games]) => ({ date, games })).sort((a, b) => a.date.localeCompare(b.date))
+      setGameDates(all)
+      // If today has no games, jump to next date with games
+      const allDates = all.map(d => d.date)
+      if (!allDates.includes(todayStr) && all.length > 0) {
+        const next = all.find(d => d.date >= todayStr)
+        if (next) setSelectedDate(next.date)
+      }
+    })
+  }, [todayStr])
+
+  // Normalize odds from the /api/today format (nested bookmakers) to the
+  // flat format the GameCard expects (spread_price, away_spread_price, etc.)
+  const normalizeOdds = (game: any) => {
+    const odds = game.odds
+    if (!odds || odds.bookmaker) return game // already normalized
+
+    // Find the home/away bookmaker entries by looking for matching spread data
+    const bookPref = ['Bovada', 'DraftKings', 'FanDuel', 'BetMGM', 'BetRivers', 'Caesars']
+    const bookmakers = odds.bookmakers || []
+    let chosen: any = bookmakers[0]
+    for (const pref of bookPref) {
+      const found = bookmakers.find((b: any) => b.name === pref)
+      if (found) { chosen = found; break }
+    }
+    if (!chosen) return game
+
+    const mkts = chosen.markets || {}
+    const homeSpread = mkts.spread?.point ?? odds.spread
+    const homeSpreadPrice = mkts.spread?.price ?? null
+    const awaySpread = homeSpread != null ? -homeSpread : odds.away_spread
+    // Find away spread price from the same bookmaker — look for matching away entry
+    // The schedule refresher doesn't store away spread price per bookmaker,
+    // so we mirror the home price as an approximation
+    const awaySpreadPrice = homeSpreadPrice != null ? homeSpreadPrice : null
+
+    return {
+      ...game,
+      odds: {
+        spread: homeSpread,
+        spread_price: homeSpreadPrice,
+        away_spread: awaySpread,
+        away_spread_price: awaySpreadPrice,
+        ml: mkts.ml ?? odds.ml,
+        away_ml: odds.away_ml,
+        total: mkts.total ?? odds.total,
+        over_price: null,
+        under_price: null,
+        bookmaker: chosen.name,
+      },
+    }
+  }
 
   // Fetch games for selected date
-  const fetchGames = useCallback(() => {
-    setLoading(true)
-    if (selectedDate === todayStr) {
-      // Use live today endpoint for current date
-      axios.get(`${API_BASE}/api/today`)
-        .then(r => { setData(r.data); setLoading(false) })
-        .catch(() => {
-          // Fallback to game logs if today.json is empty
-          axios.get(`${API_BASE}/api/games/${selectedDate}`)
-            .then(r => { setData(r.data); setLoading(false) })
-            .catch(() => setLoading(false))
-        })
-    } else {
+  const isInitialLoad = useRef(true)
+  const fetchGames = useCallback((silent = false) => {
+    if (!silent) setLoading(true)
+    axios.get(`${API_BASE}/api/today`).then(todayResp => {
+      const allGames = todayResp.data?.games || []
+      const filtered = allGames.filter((g: any) => {
+        const gameDate = g.game_date || (g.commence_time || g.date || '').slice(0, 10)
+        return gameDate === selectedDate
+      }).map(normalizeOdds)
+      if (filtered.length > 0) {
+        setData({ ...todayResp.data, games: filtered, game_count: filtered.length, date: selectedDate })
+        setLoading(false)
+      } else {
+        axios.get(`${API_BASE}/api/games/${selectedDate}`)
+          .then(r => { setData(r.data); setLoading(false) })
+          .catch(() => { setData(null); setLoading(false) })
+      }
+    }).catch(() => {
       axios.get(`${API_BASE}/api/games/${selectedDate}`)
         .then(r => { setData(r.data); setLoading(false) })
-        .catch(() => setLoading(false))
-    }
-  }, [selectedDate, todayStr])
+        .catch(() => { setData(null); setLoading(false) })
+    })
+  }, [selectedDate])
 
   useEffect(() => {
     fetchGames()
-    // Only auto-refresh if viewing today
-    if (selectedDate === todayStr) {
-      const interval = setInterval(fetchGames, 60000)
+    // Auto-refresh silently for upcoming dates
+    const isUpcoming = selectedDate >= todayStr
+    if (isUpcoming) {
+      const interval = setInterval(() => fetchGames(true), 60000)
       return () => clearInterval(interval)
     }
   }, [fetchGames, selectedDate, todayStr])
@@ -928,32 +1061,37 @@ function TodayDashboard() {
 
   const jumpToNearestGame = (direction: number) => {
     if (gameDates.length === 0) return
-    const idx = gameDates.indexOf(selectedDate)
     if (direction < 0) {
-      // Find the previous date with games
-      const earlier = gameDates.filter(d => d < selectedDate)
-      if (earlier.length > 0) setSelectedDate(earlier[earlier.length - 1])
+      const earlier = gameDates.filter(d => d.date < selectedDate)
+      if (earlier.length > 0) setSelectedDate(earlier[earlier.length - 1].date)
     } else {
-      const later = gameDates.filter(d => d > selectedDate)
-      if (later.length > 0) setSelectedDate(later[0])
+      const later = gameDates.filter(d => d.date > selectedDate)
+      if (later.length > 0) setSelectedDate(later[0].date)
     }
+  }
+
+  const formatDateLabel = (d: string) => {
+    const dt = new Date(d + 'T12:00:00')
+    return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
   }
 
   return (
     <div>
       <div className="date-nav" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
         <button onClick={() => jumpToNearestGame(-1)} title="Previous date with games">&laquo;</button>
-        <button onClick={() => shiftDate(-1)}>&lsaquo;</button>
-        <input
-          type="date"
+        <select
+          className="date-select"
           value={selectedDate}
           onChange={e => setSelectedDate(e.target.value)}
-          style={{ fontFamily: 'inherit', fontSize: 'inherit', padding: '0.25rem 0.5rem' }}
-        />
-        <button onClick={() => shiftDate(1)}>&rsaquo;</button>
+        >
+          {gameDates.map(d => (
+            <option key={d.date} value={d.date}>
+              {formatDateLabel(d.date)} — {d.games} game{d.games !== 1 ? 's' : ''}{d.date === todayStr ? ' (today)' : ''}
+            </option>
+          ))}
+        </select>
         <button onClick={() => jumpToNearestGame(1)} title="Next date with games">&raquo;</button>
         <button onClick={() => setSelectedDate(todayStr)}>Today</button>
-        {data && <span style={{ opacity: 0.6 }}>{data.game_count} game{data.game_count !== 1 ? 's' : ''}</span>}
       </div>
 
       {loading ? (
@@ -982,53 +1120,52 @@ function PnLChart({ data }: { data: PnlPoint[] }) {
   useEffect(() => {
     if (!containerRef.current || !data.length) return
 
-    if (chartRef.current) {
-      chartRef.current.remove()
-    }
-
-    const chart = createChart(containerRef.current, {
-      width: containerRef.current.clientWidth,
-      height: 250,
-      layout: {
-        background: { color: '#fdf6e3' },
-        textColor: '#586e75',
-        fontFamily: "'Fira Code', monospace",
-        fontSize: 10,
-      },
-      grid: {
-        vertLines: { color: '#eee8d5' },
-        horzLines: { color: '#eee8d5' },
-      },
-    })
-    chartRef.current = chart
-
-    const series = chart.addSeries(LineSeries, {
-      color: '#268bd2',
-      lineWidth: 2,
-    })
-
-    // Deduplicate dates (keep last pnl per date)
-    const dateMap = new Map<string, number>()
-    for (const p of data) {
-      dateMap.set(p.date, p.pnl)
-    }
-    const chartData = Array.from(dateMap.entries()).map(([date, pnl]) => ({
-      time: date as any,
-      value: pnl,
-    }))
-
-    series.setData(chartData)
-    chart.timeScale().fitContent()
-
-    const handleResize = () => {
-      if (containerRef.current && chartRef.current) {
-        chartRef.current.applyOptions({ width: containerRef.current.clientWidth })
+    try {
+      if (chartRef.current) {
+        chartRef.current.remove()
+        chartRef.current = null
       }
+
+      const container = containerRef.current
+      container.innerHTML = ''
+
+      const chart = createChart(container, {
+        width: container.clientWidth,
+        height: 250,
+        layout: {
+          background: { color: '#fdf6e3' },
+          textColor: '#586e75',
+          fontFamily: "'Fira Code', monospace",
+          fontSize: 10,
+        },
+        grid: {
+          vertLines: { color: '#eee8d5' },
+          horzLines: { color: '#eee8d5' },
+        },
+      })
+      chartRef.current = chart
+
+      const series = chart.addSeries(LineSeries, {
+        color: 'rgb(50, 50, 255)',
+        lineWidth: 2,
+      })
+
+      // Deduplicate dates (keep last pnl per date), sort ascending
+      const dateMap = new Map<string, number>()
+      for (const p of data) {
+        dateMap.set(p.date, p.pnl)
+      }
+      const chartData = Array.from(dateMap.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([date, pnl]) => ({ time: date as any, value: pnl }))
+
+      series.setData(chartData)
+      chart.timeScale().fitContent()
+    } catch (e) {
+      console.warn('PnLChart render error:', e)
     }
-    window.addEventListener('resize', handleResize)
 
     return () => {
-      window.removeEventListener('resize', handleResize)
       if (chartRef.current) {
         chartRef.current.remove()
         chartRef.current = null
@@ -1163,13 +1300,21 @@ function BacktestPage() {
         </select>
 
         <div className="section-header">Filters</div>
-        {filters.map((f, i) => (
+        {filters.map((f, i) => {
+          const isSideFilter = ['is_favorite', 'is_underdog', 'is_home', 'is_away', 'is_neutral', 'is_conference'].includes(f.stat)
+          return (
           <div key={i} className="filter-row">
             <select value={f.stat} onChange={e => {
               const next = [...filters]
-              next[i] = { ...next[i], stat: e.target.value }
-              const pair = STAT_VS_PAIRS[e.target.value]
-              if (pair && next[i].compare_col) next[i].compare_col = pair
+              const newStat = e.target.value
+              const isSide = ['is_favorite', 'is_underdog', 'is_home', 'is_away', 'is_neutral', 'is_conference'].includes(newStat)
+              if (isSide) {
+                next[i] = { ...next[i], stat: newStat, op: '==', value: '1', compare_col: undefined }
+              } else {
+                next[i] = { ...next[i], stat: newStat }
+                const pair = STAT_VS_PAIRS[newStat]
+                if (pair && next[i].compare_col) next[i].compare_col = pair
+              }
               setFilters(next)
             }}>
               <option value="">-- stat --</option>
@@ -1179,52 +1324,62 @@ function BacktestPage() {
                 </optgroup>
               ))}
             </select>
-            <select className="op" value={f.op} onChange={e => updateFilter(i, 'op', e.target.value)}>
-              <option value=">">{'>'}</option>
-              <option value=">=">{'>='}</option>
-              <option value="<">{'<'}</option>
-              <option value="<=">{'<='}</option>
-              <option value="==">{'=='}</option>
-              <option value="!=">{'!='}</option>
-            </select>
-            {f.compare_col ? (
-              <>
-                <span className="vs-label">{f.compare_col}</span>
-                <span className="vs-label">+</span>
-                <input
-                  value={f.value}
-                  onChange={e => updateFilter(i, 'value', e.target.value)}
-                  placeholder="diff"
-                  title="Minimum differential"
-                  onKeyDown={e => e.key === 'Enter' && runBacktest()}
-                  style={{ width: 40 }}
-                />
-                <button className="btn btn-sm" title="Switch to fixed value" onClick={() => {
-                  const next = [...filters]
-                  next[i] = { ...next[i], compare_col: undefined, value: '' }
-                  setFilters(next)
-                }}>val</button>
-              </>
+            {isSideFilter ? (
+              <span className="vs-label" style={{ padding: '0 8px' }}>= Yes</span>
             ) : (
               <>
-                <input
-                  value={f.value}
-                  onChange={e => updateFilter(i, 'value', e.target.value)}
-                  placeholder="value"
-                  onKeyDown={e => e.key === 'Enter' && runBacktest()}
-                />
-                {STAT_VS_PAIRS[f.stat] && (
-                  <button className="btn btn-sm" title={`Compare vs ${STAT_VS_PAIRS[f.stat]}`} onClick={() => {
-                    const next = [...filters]
-                    next[i] = { ...next[i], compare_col: STAT_VS_PAIRS[f.stat], value: '0' }
-                    setFilters(next)
-                  }}>vs</button>
+                <select className="op" value={f.op} onChange={e => updateFilter(i, 'op', e.target.value)}>
+                  <option value=">">{'>'}</option>
+                  <option value=">=">{'>='}</option>
+                  <option value="<">{'<'}</option>
+                  <option value="<=">{'<='}</option>
+                  <option value="==">{'=='}</option>
+                  <option value="!=">{'!='}</option>
+                </select>
+                {f.compare_col ? (
+                  <>
+                    <VsCompareSelect value={f.compare_col!} onChange={v => {
+                      const next = [...filters]
+                      next[i] = { ...next[i], compare_col: v }
+                      setFilters(next)
+                    }} />
+                    <span className="vs-label">+</span>
+                    <input
+                      value={f.value}
+                      onChange={e => updateFilter(i, 'value', e.target.value)}
+                      placeholder="diff"
+                      title="Minimum differential"
+                      onKeyDown={e => e.key === 'Enter' && runBacktest()}
+                      style={{ width: 40 }}
+                    />
+                    <button className="btn btn-sm" title="Switch to fixed value" onClick={() => {
+                      const next = [...filters]
+                      next[i] = { ...next[i], compare_col: undefined, value: '' }
+                      setFilters(next)
+                    }}>val</button>
+                  </>
+                ) : (
+                  <>
+                    <input
+                      value={f.value}
+                      onChange={e => updateFilter(i, 'value', e.target.value)}
+                      placeholder="value"
+                      onKeyDown={e => e.key === 'Enter' && runBacktest()}
+                    />
+                    <button className="btn btn-sm" title="Compare vs opponent stat" onClick={() => {
+                      const pair = STAT_VS_PAIRS[f.stat] || f.stat.replace('team_', 'opp_')
+                      const next = [...filters]
+                      next[i] = { ...next[i], compare_col: pair, value: '0' }
+                      setFilters(next)
+                    }}>vs</button>
+                  </>
                 )}
               </>
             )}
             <button className="btn btn-sm btn-danger" onClick={() => removeFilter(i)}>x</button>
           </div>
-        ))}
+          )
+        })}
         <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
           <button className="btn btn-sm" onClick={addFilter}>+ Filter</button>
         </div>

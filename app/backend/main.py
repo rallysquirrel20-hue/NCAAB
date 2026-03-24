@@ -190,7 +190,29 @@ def _lookup_odds_for_game(home_canonical: str, away_canonical: str,
 # Backtest engine (adapted from ncaab_backtest.py)
 # ---------------------------------------------------------------------------
 
-JUICE = -110
+DEFAULT_JUICE = -110
+
+
+def _stake_for_price(price: float) -> float:
+    """Calculate stake to win 1 unit at the given American odds price.
+
+    Negative odds (e.g. -110): stake = abs(price) / 100 = 1.1 units
+    Positive odds (e.g. +105): stake = 1.0 unit
+    """
+    if price < 0:
+        return abs(price) / 100.0
+    return 1.0
+
+
+def _payout_for_price(price: float) -> float:
+    """Calculate profit when winning at the given American odds.
+
+    Negative odds: profit = 1.0 (we sized stake to win exactly 1 unit)
+    Positive odds: profit = price / 100 (e.g. +105 -> 1.05 units)
+    """
+    if price < 0:
+        return 1.0
+    return price / 100.0
 
 
 def _enrich_with_ranks(df: pd.DataFrame) -> pd.DataFrame:
@@ -249,6 +271,76 @@ def _enrich_with_ranks(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _enrich_with_spread_prices(df: pd.DataFrame) -> pd.DataFrame:
+    """Add closing spread price from odds history to each game row."""
+    odf = _get_odds_history()
+    if odf.empty:
+        df["spread_price"] = float(DEFAULT_JUICE)
+        return df
+
+    spreads = odf[odf["market"] == "spreads"].copy()
+    if spreads.empty:
+        df["spread_price"] = float(DEFAULT_JUICE)
+        return df
+
+    # Filter to reasonable pre-game prices only (exclude live in-game odds)
+    # In-game spread prices can be absurd (-50000, +4000, etc.)
+    spreads = spreads[
+        spreads["price"].notna()
+        & (spreads["price"].abs() <= 300)
+    ]
+
+    # Build lookup: (home_odds_name, away_odds_name, outcome) -> last reasonable spread price
+    price_map: dict[tuple[str, str, str], float] = {}
+    for gid, group in spreads.groupby("game_id"):
+        last_snap = group["snapshot_time"].max()
+        snap = group[group["snapshot_time"] == last_snap]
+        available = snap["bookmaker"].unique()
+        chosen = None
+        for b in _BOOK_PREF:
+            if b in available:
+                chosen = b
+                break
+        if not chosen:
+            chosen = available[0]
+        book_rows = snap[snap["bookmaker"] == chosen]
+        home = snap["home_team"].iloc[0]
+        away = snap["away_team"].iloc[0]
+        for _, row in book_rows.iterrows():
+            outcome = row["outcome"]
+            if pd.notna(row["price"]):
+                price_map[(home, away, outcome)] = float(row["price"])
+
+    # Map prices to game log rows
+    prices = []
+    for _, row in df.iterrows():
+        team = row["team"]
+        team_odds = _CANONICAL_TO_ODDS.get(team, team)
+        # Find opponent canonical
+        opp_name = row.get("opponent", "")
+        opp_canonical = None
+        for t in TEAMS:
+            if opp_name.startswith(t) or t == opp_name:
+                opp_canonical = t
+                break
+        opp_odds = _CANONICAL_TO_ODDS.get(opp_canonical, opp_name) if opp_canonical else opp_name
+
+        ha = row.get("home_away", "home")
+        if ha in ("home", "neutral"):
+            home_key, away_key = team_odds, opp_odds
+        else:
+            home_key, away_key = opp_odds, team_odds
+
+        # Look up this team's spread price
+        price = price_map.get((home_key, away_key, team_odds))
+        if price is None:
+            price = float(DEFAULT_JUICE)
+        prices.append(price)
+
+    df["spread_price"] = prices
+    return df
+
+
 def _load_testable_games(df: pd.DataFrame) -> pd.DataFrame:
     mask = (
         (df["is_tracked"] == True)
@@ -261,7 +353,15 @@ def _load_testable_games(df: pd.DataFrame) -> pd.DataFrame:
     df["ats_margin"] = df["margin"] + df["closing_fg_spread"].astype(float)
     df["covered"] = df["ats_margin"] > 0
     df["push"] = df["ats_margin"] == 0
+    # Side columns: 1 = yes, 0 = no (filterable as numeric)
+    df["is_favorite"] = (df["closing_fg_spread"] < 0).astype(int)
+    df["is_underdog"] = (df["closing_fg_spread"] > 0).astype(int)
+    df["is_home"] = (df["home_away"] == "home").astype(int)
+    df["is_away"] = (df["home_away"] == "away").astype(int)
+    df["is_neutral"] = (df["home_away"] == "neutral").astype(int)
+    df["is_conference"] = df["conference_game"].isin([True, "Y"]).astype(int)
     df = _enrich_with_ranks(df)
+    df = _enrich_with_spread_prices(df)
     return df
 
 
@@ -274,8 +374,23 @@ def _run_backtest(df: pd.DataFrame, mask: pd.Series, name: str) -> dict:
     wins = int(filtered["covered"].sum())
     losses = n - wins
     win_pct = wins / n
-    profit = wins * (100 / abs(JUICE)) - losses
-    roi = profit / n * 100
+
+    # P&L using actual spread prices per game
+    total_profit = 0.0
+    total_risked = 0.0
+    for _, row in filtered.iterrows():
+        price = row.get("spread_price", DEFAULT_JUICE)
+        if pd.isna(price):
+            price = DEFAULT_JUICE
+        price = float(price)
+        stake = _stake_for_price(price)
+        if row["covered"]:
+            total_profit += _payout_for_price(price)
+        else:
+            total_profit -= stake
+        total_risked += stake
+
+    roi = (total_profit / total_risked * 100) if total_risked > 0 else 0
 
     p_value = stats.binomtest(wins, n, 0.5, alternative="greater").pvalue
 
@@ -290,6 +405,7 @@ def _run_backtest(df: pd.DataFrame, mask: pd.Series, name: str) -> dict:
         "wins": wins,
         "losses": losses,
         "win_pct": round(win_pct, 4),
+        "profit": round(total_profit, 2),
         "roi": round(roi, 2),
         "p_value": round(p_value, 6),
         "ci_low": round(center - margin_val, 4),
@@ -802,23 +918,34 @@ def get_games_by_date(date: str):
 
 @app.get("/api/dates")
 def get_game_dates():
-    """Return all dates that have tracked games, sorted."""
+    """Return all dates with tracked games and game counts."""
     df = _get_game_logs()
     if df.empty:
         return []
     tracked = df[df["is_tracked"] == True]
-    dates = sorted(tracked["date"].unique().tolist())
-    return dates
+    # Count unique events per date (not rows, since each game has 2 rows)
+    counts = tracked.groupby("date")["event_id"].nunique()
+    return [{"date": d, "games": int(c)} for d, c in sorted(counts.items())]
 
 
 def _find_game_teams(game_id: str) -> tuple[str, str] | None:
-    """Find home/away canonical names for a game_id from game logs."""
+    """Find home/away canonical names for a game_id from game logs or today.json."""
     df = _get_game_logs()
-    if df.empty:
-        return None
-    rows = df[df["event_id"] == game_id]
-    if rows.empty:
-        return None
+    if not df.empty:
+        rows = df[df["event_id"] == game_id]
+        if not rows.empty:
+            return _extract_teams_from_logs(rows)
+
+    # Fallback: check today.json for upcoming/scheduled games
+    today = _get_today()
+    for g in today.get("games", []):
+        if str(g.get("game_id")) == str(game_id):
+            return (g["home"]["name"], g["away"]["name"])
+
+    return None
+
+
+def _extract_teams_from_logs(rows) -> tuple[str, str] | None:
     # Get one row and determine home/away
     for _, r in rows.iterrows():
         ha = r.get("home_away", "home")
@@ -949,11 +1076,15 @@ def get_game_matchup(game_id: str):
         "team_home_ppg", "team_away_ppg",
     ]
 
-    # Determine game date for rankings
+    # Determine game date for rankings — use game date if in logs,
+    # otherwise use latest available date (for upcoming games)
     game_date = None
     tracked = df[df["event_id"] == game_id]
     if not tracked.empty:
         game_date = tracked.iloc[0]["date"]
+    else:
+        # Upcoming game: use the most recent date in the logs
+        game_date = df["date"].max()
 
     rankings = _compute_rankings(game_date) if game_date else {}
 
@@ -1130,27 +1261,32 @@ def run_backtest(req: BacktestRequest):
     filtered = testable[mask & ~testable["push"]]
     game_list = []
     for _, row in filtered.iterrows():
+        price = float(row.get("spread_price", DEFAULT_JUICE))
+        if pd.isna(price):
+            price = float(DEFAULT_JUICE)
+        stake = _stake_for_price(price)
+        payout = _payout_for_price(price)
         game_list.append({
             "date": row["date"],
             "team": row["team"],
             "opponent": row["opponent"],
             "home_away": row["home_away"],
             "spread": row.get("closing_fg_spread"),
+            "spread_price": price,
             "team_score": int(row["team_score"]),
             "opp_score": int(row["opp_score"]),
             "margin": float(row["margin"]),
             "ats_margin": float(row["ats_margin"]),
             "covered": bool(row["covered"]),
+            "stake": round(stake, 2),
+            "profit": round(payout if row["covered"] else -stake, 2),
         })
 
-    # Cumulative P&L
+    # Cumulative P&L using actual prices
     pnl = []
     cumulative = 0.0
     for g in game_list:
-        if g["covered"]:
-            cumulative += 100 / abs(JUICE)
-        else:
-            cumulative -= 1.0
+        cumulative += g["profit"]
         pnl.append({"date": g["date"], "pnl": round(cumulative, 2)})
 
     return {"result": result, "games": game_list, "pnl": pnl}
@@ -1256,6 +1392,14 @@ def get_columns():
             {"col": "closing_fg_spread", "label": "Closing Spread"},
             {"col": "opening_fg_ml", "label": "Opening ML"},
             {"col": "closing_fg_ml", "label": "Closing ML"},
+        ],
+        "side": [
+            {"col": "is_favorite", "label": "Is Favorite (1/0)"},
+            {"col": "is_underdog", "label": "Is Underdog (1/0)"},
+            {"col": "is_home", "label": "Is Home (1/0)"},
+            {"col": "is_away", "label": "Is Away (1/0)"},
+            {"col": "is_neutral", "label": "Is Neutral Site (1/0)"},
+            {"col": "is_conference", "label": "Is Conference Game (1/0)"},
         ],
         "location": [
             {"col": "home_away", "label": "Home/Away"},

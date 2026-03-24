@@ -128,6 +128,17 @@ html, body, #root {
   cursor: default;
 }
 
+.date-select {
+  font-family: inherit;
+  font-size: 13px;
+  padding: 4px 8px;
+  background: var(--bg-card);
+  color: var(--text-bold);
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  min-width: 220px;
+}
+
 .game-status {
   font-size: 10px;
   font-weight: bold;
@@ -227,6 +238,37 @@ td.ot-line {
   border-top: 1px solid var(--border-color);
 }
 
+.detail-section {
+  margin-bottom: 8px;
+}
+
+.detail-panel {
+  background: var(--bg-main);
+  border: 1px solid var(--border-color);
+  padding: 10px 12px;
+  margin-top: 10px;
+}
+
+.detail-panel .section-header {
+  margin-bottom: 8px;
+}
+
+.scrollable-table {
+  max-height: 250px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+}
+
+.scrollable-table thead th {
+  position: sticky;
+  top: -1px;
+  background: var(--bg-main);
+  z-index: 2;
+  border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+  box-shadow: 0 1px 0 var(--border-color), 0 -1px 0 var(--border-color);
+}
+
 /* Chart view toggle */
 .chart-view-toggle {
   display: flex;
@@ -266,6 +308,10 @@ td.ot-line {
 .matchup-table th {
   border-bottom: 1px solid var(--border-color);
   color: var(--text-bold);
+}
+
+.matchup-table tbody tr:hover td {
+  background: var(--base1) !important;
 }
 
 .mu-rank {
@@ -455,9 +501,10 @@ td.ot-line {
 
 /* P&L chart */
 .pnl-chart {
-  height: 250px;
-  margin: 12px 0;
+  height: 280px;
+  margin: 12px 0 16px;
   border: 1px solid var(--border-color);
+  overflow: hidden;
 }
 
 /* Games table */
@@ -524,11 +571,9 @@ td.ot-line {
 /* Clickable stat cells in matchup table */
 .stat-clickable {
   cursor: pointer;
-  transition: background 0.1s;
 }
 
 .stat-clickable:hover {
-  background: var(--bg-main);
   outline: 1px solid var(--blue);
   outline-offset: -1px;
 }

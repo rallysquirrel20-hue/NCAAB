@@ -109,10 +109,11 @@ def get_latest_pit_stats() -> dict[str, dict]:
     return pit_stats
 
 
-def fetch_todays_schedule() -> list[dict]:
-    """Fetch today's games from ESPN scoreboard."""
-    today = datetime.now()
-    date_param = today.strftime("%Y%m%d")
+LOOKAHEAD_DAYS = 7
+
+
+def fetch_schedule(date_param: str) -> list[dict]:
+    """Fetch games for a single date (YYYYMMDD) from ESPN scoreboard."""
     try:
         resp = requests.get(
             f"{ESPN_BASE}/scoreboard",
@@ -120,10 +121,31 @@ def fetch_todays_schedule() -> list[dict]:
             timeout=30,
         )
         resp.raise_for_status()
-        data = resp.json()
+        return resp.json().get("events", [])
     except Exception as e:
-        print(f"  [{_now_str()}] ESPN scoreboard error: {e}")
+        print(f"  [{_now_str()}] ESPN scoreboard error for {date_param}: {e}")
         return []
+
+
+def fetch_todays_schedule() -> list[dict]:
+    """Fetch games from today through LOOKAHEAD_DAYS days ahead."""
+    today = datetime.now()
+    all_events = []
+    dates_checked = []
+    event_espn_date: dict[str, str] = {}
+    for offset in range(LOOKAHEAD_DAYS + 1):
+        d = today + timedelta(days=offset)
+        date_param = d.strftime("%Y%m%d")
+        date_str = d.strftime("%Y-%m-%d")
+        dates_checked.append(date_str)
+        events = fetch_schedule(date_param)
+        for ev in events:
+            eid = ev.get("id", "")
+            if eid not in event_espn_date:
+                event_espn_date[eid] = date_str
+        all_events.extend(events)
+
+    print(f"  [{_now_str()}] Checked {len(dates_checked)} dates: {dates_checked[0]} to {dates_checked[-1]}")
 
     team_ids = load_team_ids()
     id_to_name = {tid: name for name, tid in team_ids.items()}
@@ -132,7 +154,7 @@ def fetch_todays_schedule() -> list[dict]:
     games = []
     seen_events = set()
 
-    for ev in data.get("events", []):
+    for ev in all_events:
         event_id = ev.get("id", "")
         if event_id in seen_events:
             continue
@@ -182,6 +204,7 @@ def fetch_todays_schedule() -> list[dict]:
         game = {
             "game_id": event_id,
             "commence_time": commence_time,
+            "game_date": event_espn_date.get(event_id, commence_time[:10]),
             "status": status_name,
             "status_detail": status_detail,
             "neutral_site": neutral_site,
@@ -321,7 +344,7 @@ def run_refresh():
     print(f"[{_now_str()}] Refreshing schedule...")
 
     games = fetch_todays_schedule()
-    print(f"  [{_now_str()}] Found {len(games)} games today")
+    print(f"  [{_now_str()}] Found {len(games)} games (today + {LOOKAHEAD_DAYS} days)")
 
     if games:
         odds_data = fetch_current_odds()

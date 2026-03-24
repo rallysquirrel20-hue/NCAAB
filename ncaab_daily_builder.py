@@ -424,6 +424,7 @@ def parse_scoreboard(
     events: list[dict],
     tracked_ids: set[str],
     id_to_name: dict[str, str],
+    scoreboard_date: str = "",
 ) -> list[dict]:
     rows: list[dict] = []
     for ev in events:
@@ -436,16 +437,21 @@ def parse_scoreboard(
 
         event_id = ev.get("id", "")
         date_raw = comp.get("date", "")
-        game_date = ""
-        if date_raw:
+        # Use the ESPN scoreboard date (the date we queried) as the
+        # authoritative game date.  This avoids UTC-to-ET drift for
+        # late-night games.
+        if scoreboard_date:
+            game_date = scoreboard_date
+        elif date_raw:
             try:
                 dt = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
-                # Convert to US Eastern to match ESPN's scoreboard date
                 from zoneinfo import ZoneInfo
                 dt_et = dt.astimezone(ZoneInfo("America/New_York"))
                 game_date = dt_et.strftime("%Y-%m-%d")
             except (ValueError, KeyError):
                 game_date = date_raw[:10]
+        else:
+            game_date = ""
 
         neutral_site = comp.get("neutralSite", False)
         competitors = comp.get("competitors", [])
@@ -1103,7 +1109,7 @@ def phase1_fetch_games(
         if not events:
             continue
 
-        day_games = parse_scoreboard(events, tracked_ids, id_to_name)
+        day_games = parse_scoreboard(events, tracked_ids, id_to_name, date_str)
         day_games = [
             g for g in day_games
             if (g["team"], g["event_id"]) not in existing_keys
