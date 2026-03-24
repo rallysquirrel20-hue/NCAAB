@@ -102,14 +102,17 @@ def append_to_history(rows: list[dict]) -> None:
     new_df = pd.DataFrame(rows, columns=HISTORY_COLUMNS)
 
     if HISTORY_FILE.exists():
-        existing = pd.read_parquet(HISTORY_FILE)
-        combined = pd.concat([existing, new_df], ignore_index=True)
+        try:
+            existing = pd.read_parquet(HISTORY_FILE)
+            combined = pd.concat([existing, new_df], ignore_index=True)
+            combined.to_parquet(HISTORY_FILE, index=False, engine="pyarrow")
+            print(f"  [{_now_str()}] History: {len(combined)} total rows (+{len(rows)} new)")
+        except Exception as e:
+            print(f"  [{_now_str()}] History write error: {e}. Starting fresh.")
+            new_df.to_parquet(HISTORY_FILE, index=False, engine="pyarrow")
     else:
-        combined = new_df
-
-    combined.to_parquet(HISTORY_FILE, index=False, engine="pyarrow")
-    print(f"  [{_now_str()}] History: {len(combined)} total rows "
-          f"(+{len(rows)} new)")
+        new_df.to_parquet(HISTORY_FILE, index=False, engine="pyarrow")
+        print(f"  [{_now_str()}] History: Created new file with {len(rows)} rows")
 
 
 def run_refresh():

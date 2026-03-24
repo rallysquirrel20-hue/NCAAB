@@ -20,5 +20,19 @@ module.exports = {
         PYTHONPATH: path.join(__dirname, "app", "backend"),
       },
     },
+    {
+      name: "ncaab-odds",
+      cwd: __dirname,
+      interpreter: path.join(__dirname, "app", "backend", "venv", "Scripts", "python.exe"),
+      script: "ncaab_odds_refresher.py",
+      args: "--loop --interval 900",
+    },
+    {
+      name: "ncaab-schedule",
+      cwd: __dirname,
+      interpreter: path.join(__dirname, "app", "backend", "venv", "Scripts", "python.exe"),
+      script: "ncaab_schedule_refresher.py",
+      args: "--loop --interval 300",
+    },
   ],
 };

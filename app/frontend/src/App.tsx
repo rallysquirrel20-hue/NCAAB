@@ -22,11 +22,21 @@ interface TeamSide {
 
 interface GameOdds {
   spread: number | null
-  ml: number | null
-  total: number | null
+  spread_price: number | null
   away_spread: number | null
+  away_spread_price: number | null
+  ml: number | null
   away_ml: number | null
-  bookmakers: Array<{
+  total: number | null
+  over_price: number | null
+  under_price: number | null
+  bookmaker?: string
+  // Legacy fields from today endpoint
+  opening_spread?: number | null
+  opening_ml?: number | null
+  away_opening_spread?: number | null
+  away_opening_ml?: number | null
+  bookmakers?: Array<{
     name: string
     markets: Record<string, any>
   }>
@@ -103,9 +113,25 @@ type View = 'today' | 'backtest'
 // Helpers
 // ============================================================================
 
-function formatTime(isoStr: string): string {
+function formatTime(isoStr: string | undefined, dateStr?: string): string {
+  if (!isoStr && dateStr) {
+    // Historical game — show the date
+    try {
+      const d = new Date(dateStr + 'T12:00:00')
+      return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+    } catch { return dateStr }
+  }
+  if (!isoStr) return ''
   try {
     const d = new Date(isoStr)
+    if (isNaN(d.getTime())) {
+      // Fallback: try treating as date string
+      return dateStr || isoStr
+    }
+    // If time is midnight (placeholder), show date instead
+    if (d.getUTCHours() === 0 && d.getUTCMinutes() === 0) {
+      return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+    }
     return d.toLocaleTimeString('en-US', {
       hour: 'numeric',
       minute: '2-digit',
@@ -113,7 +139,7 @@ function formatTime(isoStr: string): string {
       timeZoneName: 'short',
     })
   } catch {
-    return isoStr
+    return dateStr || isoStr
   }
 }
 
@@ -235,7 +261,7 @@ function MatchupTable({ gameId, onStatClick }: { gameId: string; onStatClick?: (
   const [matchup, setMatchup] = useState<any>(null)
 
   useEffect(() => {
-    axios.get(`${API_BASE}/api/today/${gameId}/matchup`)
+    axios.get(`${API_BASE}/api/game/${gameId}/matchup`)
       .then(r => setMatchup(r.data))
       .catch(() => {})
   }, [gameId])
@@ -244,6 +270,8 @@ function MatchupTable({ gameId, onStatClick }: { gameId: string; onStatClick?: (
 
   const home = matchup.home || {}
   const away = matchup.away || {}
+  const homeRanks: Record<string, number> = home.ranks || {}
+  const awayRanks: Record<string, number> = away.ranks || {}
 
   const handleStatClick = (key: string, value: any, higherBetter: boolean, label: string) => {
     if (value == null || !onStatClick) return
@@ -265,9 +293,11 @@ function MatchupTable({ gameId, onStatClick }: { gameId: string; onStatClick?: (
     <table className="matchup-table">
       <thead>
         <tr>
-          <th>{away.name || 'Away'}</th>
-          <th>Stat</th>
-          <th>{home.name || 'Home'}</th>
+          <th className="mu-rank">Rank</th>
+          <th className="mu-val">{away.name || 'Away'}</th>
+          <th className="mu-label">Stat</th>
+          <th className="mu-val">{home.name || 'Home'}</th>
+          <th className="mu-rank">Rank</th>
         </tr>
       </thead>
       <tbody>
@@ -295,23 +325,28 @@ function MatchupTable({ gameId, onStatClick }: { gameId: string; onStatClick?: (
 
           const clickable = onStatClick ? ' stat-clickable' : ''
 
+          const aRank = awayRanks[key]
+          const hRank = homeRanks[key]
+
           return (
             <tr key={key}>
+              <td className="mu-rank">{aRank != null ? `#${aRank}` : ''}</td>
               <td
-                className={aClass + clickable}
+                className={'mu-val ' + aClass + clickable}
                 onClick={() => handleStatClick(key, aVal, higherBetter, label)}
                 title={onStatClick && aVal != null ? `Click to add ${label} filter` : undefined}
               >
                 {fmt(aVal)}
               </td>
-              <td>{label}</td>
+              <td className="mu-label">{label}</td>
               <td
-                className={hClass + clickable}
+                className={'mu-val ' + hClass + clickable}
                 onClick={() => handleStatClick(key, hVal, higherBetter, label)}
                 title={onStatClick && hVal != null ? `Click to add ${label} filter` : undefined}
               >
                 {fmt(hVal)}
               </td>
+              <td className="mu-rank">{hRank != null ? `#${hRank}` : ''}</td>
             </tr>
           )
         })}
@@ -577,46 +612,46 @@ function GameBacktest({ game }: { game: Game }) {
 // OddsMovementChart Component
 // ============================================================================
 
+type OddsChartView = 'spread' | 'spread_price' | 'moneyline'
+
 function OddsMovementChart({ gameId }: { gameId: string }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const [oddsData, setOddsData] = useState<any>(null)
+  const [chartView, setChartView] = useState<OddsChartView>('spread')
 
   useEffect(() => {
-    axios.get(`${API_BASE}/api/today/${gameId}/odds`)
+    axios.get(`${API_BASE}/api/game/${gameId}/odds`)
       .then(r => setOddsData(r.data))
       .catch(() => {})
   }, [gameId])
 
   useEffect(() => {
-    if (!containerRef.current || !oddsData || !oddsData.snapshots?.length) return
+    if (!containerRef.current || !oddsData || !oddsData.timeline?.length) return
 
-    // Extract spread data per bookmaker over time
-    const bookmakerSpreads: Record<string, Array<{ time: number; value: number }>> = {}
+    const spreadData: Array<{ time: number; value: number }> = []
+    const homeSpreadPrice: Array<{ time: number; value: number }> = []
+    const awaySpreadPrice: Array<{ time: number; value: number }> = []
+    const mlHomeData: Array<{ time: number; value: number }> = []
+    const mlAwayData: Array<{ time: number; value: number }> = []
 
-    for (const snap of oddsData.snapshots) {
-      const t = new Date(snap.time).getTime() / 1000
-      for (const [bm, markets] of Object.entries(snap.bookmakers as Record<string, any>)) {
-        const spreads = markets.spreads
-        if (!spreads) continue
-        for (const oc of spreads) {
-          if (oc.outcome === oddsData.home && oc.point != null) {
-            if (!bookmakerSpreads[bm]) bookmakerSpreads[bm] = []
-            bookmakerSpreads[bm].push({ time: t as any, value: oc.point })
-          }
-        }
-      }
+    for (const snap of oddsData.timeline) {
+      const t = Math.floor(new Date(snap.time).getTime() / 1000)
+      if (snap.home_spread != null) spreadData.push({ time: t, value: snap.home_spread })
+      if (snap.home_spread_price != null) homeSpreadPrice.push({ time: t, value: snap.home_spread_price })
+      if (snap.away_spread_price != null) awaySpreadPrice.push({ time: t, value: snap.away_spread_price })
+      if (snap.home_ml != null) mlHomeData.push({ time: t, value: snap.home_ml })
+      if (snap.away_ml != null) mlAwayData.push({ time: t, value: snap.away_ml })
     }
-
-    if (Object.keys(bookmakerSpreads).length === 0) return
 
     if (chartRef.current) {
       chartRef.current.remove()
+      chartRef.current = null
     }
 
     const chart = createChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height: 200,
+      height: 220,
       layout: {
         background: { color: '#fdf6e3' },
         textColor: '#586e75',
@@ -628,18 +663,56 @@ function OddsMovementChart({ gameId }: { gameId: string }) {
         horzLines: { color: '#eee8d5' },
       },
       timeScale: { timeVisible: true },
+      rightPriceScale: { visible: true },
+      leftPriceScale: { visible: false },
     })
     chartRef.current = chart
 
-    const colors = ['#268bd2', '#dc322f', '#859900', '#d33682', '#6c71c4', '#cb4b16', '#2aa198']
-    let i = 0
-    for (const [, data] of Object.entries(bookmakerSpreads)) {
-      const series = chart.addSeries(LineSeries, {
-        color: colors[i % colors.length],
+    if (chartView === 'spread' && spreadData.length > 0) {
+      const s = chart.addSeries(LineSeries, {
+        color: 'rgb(50, 50, 255)',
         lineWidth: 2,
+        title: `${oddsData.home} Spread`,
       })
-      series.setData(data.sort((a, b) => (a.time as number) - (b.time as number)) as any)
-      i++
+      s.setData(spreadData as any)
+    }
+
+    if (chartView === 'spread_price') {
+      if (homeSpreadPrice.length > 0) {
+        const s = chart.addSeries(LineSeries, {
+          color: 'rgb(50, 50, 255)',
+          lineWidth: 2,
+          title: `${oddsData.home} Price`,
+        })
+        s.setData(homeSpreadPrice as any)
+      }
+      if (awaySpreadPrice.length > 0) {
+        const s = chart.addSeries(LineSeries, {
+          color: 'rgb(255, 50, 150)',
+          lineWidth: 2,
+          title: `${oddsData.away} Price`,
+        })
+        s.setData(awaySpreadPrice as any)
+      }
+    }
+
+    if (chartView === 'moneyline') {
+      if (mlHomeData.length > 0) {
+        const s = chart.addSeries(LineSeries, {
+          color: 'rgb(50, 50, 255)',
+          lineWidth: 2,
+          title: `${oddsData.home} ML`,
+        })
+        s.setData(mlHomeData as any)
+      }
+      if (mlAwayData.length > 0) {
+        const s = chart.addSeries(LineSeries, {
+          color: 'rgb(255, 50, 150)',
+          lineWidth: 2,
+          title: `${oddsData.away} ML`,
+        })
+        s.setData(mlAwayData as any)
+      }
     }
 
     chart.timeScale().fitContent()
@@ -650,16 +723,46 @@ function OddsMovementChart({ gameId }: { gameId: string }) {
         chartRef.current = null
       }
     }
-  }, [oddsData])
+  }, [oddsData, chartView])
 
-  if (!oddsData || !oddsData.snapshots?.length) {
+  if (!oddsData || !oddsData.timeline?.length) {
     return <div style={{ fontSize: 11, color: '#657b83', marginTop: 8 }}>No odds movement data</div>
   }
 
+  const tl = oddsData.timeline
   return (
     <div>
-      <div className="section-header">Spread Movement ({oddsData.snapshot_count} snapshots)</div>
+      <div className="section-header">Odds Movement — {oddsData.home} vs {oddsData.away} ({oddsData.snapshot_count} snapshots)</div>
+      <div className="chart-view-toggle">
+        <button className={chartView === 'spread' ? 'active' : ''} onClick={() => setChartView('spread')}>Spread</button>
+        <button className={chartView === 'spread_price' ? 'active' : ''} onClick={() => setChartView('spread_price')}>Spread Price</button>
+        <button className={chartView === 'moneyline' ? 'active' : ''} onClick={() => setChartView('moneyline')}>Moneyline</button>
+      </div>
       <div ref={containerRef} className="odds-chart-container" />
+      <div className="odds-timeline-table" style={{ maxHeight: 250, overflowY: 'auto' }}>
+        <table className="matchup-table" style={{ fontSize: 11 }}>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Spread</th>
+              <th>{oddsData.home} ML</th>
+              <th>{oddsData.away} ML</th>
+              <th>Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tl.map((s: any, i: number) => (
+              <tr key={i}>
+                <td style={{ whiteSpace: 'nowrap' }}>{new Date(s.time).toLocaleString('en-US', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })}</td>
+                <td>{s.home_spread != null ? `${formatSpread(s.home_spread)} (${formatML(s.home_spread_price)})` : '-'}</td>
+                <td className={s.home_ml != null && s.home_ml < 0 ? 'fav' : 'dog'}>{s.home_ml != null ? formatML(s.home_ml) : '-'}</td>
+                <td className={s.away_ml != null && s.away_ml < 0 ? 'fav' : 'dog'}>{s.away_ml != null ? formatML(s.away_ml) : '-'}</td>
+                <td>{s.total != null ? `${s.total} (O ${formatML(s.over_price)} / U ${formatML(s.under_price)})` : '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
@@ -675,69 +778,95 @@ function GameCard({ game }: { game: Game }) {
   const hasScores = game.home.score != null
 
   return (
-    <div className={`game-card ${expanded ? 'expanded' : ''}`}>
-      <div className="game-header" onClick={() => setExpanded(!expanded)} style={{ cursor: 'pointer' }}>
-        <span className="game-time">
-          {formatTime(game.commence_time)}
-          {game.neutral_site && ' (Neutral)'}
-        </span>
-        {expanded && <button className="collapse-btn" onClick={e => { e.stopPropagation(); setExpanded(false) }}>collapse</button>}
-        <span className={`game-status ${getStatusClass(game.status)}`}>
-          {getStatusLabel(game.status, game.status_detail)}
-        </span>
-      </div>
-
-      <div className="game-teams" onClick={() => !expanded && setExpanded(true)} style={{ cursor: expanded ? 'default' : 'pointer' }}>
-        <div className="team-side away">
-          <div className="team-name">{game.away.display_name}</div>
-          <div className="team-record">
-            {game.away.stats?.record || ''} {game.away.stats?.ats ? `(${game.away.stats.ats} ATS)` : ''}
-          </div>
-          {hasScores && <div className="team-score">{game.away.score}</div>}
-        </div>
-
-        <div className="vs-divider">{hasScores ? '' : '@'}</div>
-
-        <div className="team-side home">
-          <div className="team-name">{game.home.display_name}</div>
-          <div className="team-record">
-            {game.home.stats?.record || ''} {game.home.stats?.ats ? `(${game.home.stats.ats} ATS)` : ''}
-          </div>
-          {hasScores && <div className="team-score">{game.home.score}</div>}
-        </div>
-      </div>
-
-      {odds && (
-        <div className="game-odds">
-          <div className="odds-item">
-            <div className="odds-label">Spread</div>
-            <div className={`odds-value ${odds.spread && odds.spread < 0 ? 'fav' : 'dog'}`}>
-              {formatSpread(odds.spread)}
-            </div>
-          </div>
-          <div className="odds-item">
-            <div className="odds-label">Home ML</div>
-            <div className={`odds-value ${odds.ml && odds.ml < 0 ? 'fav' : 'dog'}`}>
-              {formatML(odds.ml)}
-            </div>
-          </div>
-          <div className="odds-item">
-            <div className="odds-label">Away ML</div>
-            <div className={`odds-value ${odds.away_ml && odds.away_ml < 0 ? 'fav' : 'dog'}`}>
-              {formatML(odds.away_ml)}
-            </div>
-          </div>
-          {odds.total != null && (
-            <div className="odds-item">
-              <div className="odds-label">Total</div>
-              <div className="odds-value">{odds.total}</div>
-            </div>
-          )}
-        </div>
+    <div className={`game-card ${expanded ? 'expanded' : ''}`} onClick={() => !expanded && setExpanded(true)} style={{ cursor: expanded ? 'default' : 'pointer' }}>
+      <table className="odds-table">
+        <thead>
+          <tr>
+            <th className="ot-meta"></th>
+            <th className="ot-team"></th>
+            {hasScores && <th className="ot-score">Score</th>}
+            <th className="ot-line">Spread</th>
+            <th className="ot-line">Win</th>
+            {odds?.total != null && <th className="ot-line">Total</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {/* Away row */}
+          <tr className="ot-row">
+            <td className="ot-meta" rowSpan={2}>
+              <div className="ot-date">{formatTime(game.commence_time, (game as any).date)}</div>
+              <div className={`game-status ${getStatusClass(game.status)}`}>
+                {getStatusLabel(game.status, game.status_detail || '')}
+              </div>
+              {game.neutral_site && <div className="ot-neutral">Neutral</div>}
+            </td>
+            <td className="ot-team">
+              <div className="team-name">{game.away.display_name}</div>
+              <div className="team-record">
+                {game.away.stats?.record || ''} {game.away.stats?.ats ? `(${game.away.stats.ats} ATS)` : ''}
+              </div>
+            </td>
+            {hasScores && <td className="ot-score">{game.away.score}</td>}
+            <td className="ot-line">
+              {odds && (
+                <span className={odds.away_spread != null && odds.away_spread < 0 ? 'fav' : 'dog'}>
+                  {formatSpread(odds.away_spread)}
+                  {odds.away_spread_price != null && <span className="odds-juice"> ({formatML(odds.away_spread_price)})</span>}
+                </span>
+              )}
+            </td>
+            <td className="ot-line">
+              {odds && (
+                <span className={odds.away_ml != null && odds.away_ml < 0 ? 'fav' : 'dog'}>
+                  {formatML(odds.away_ml)}
+                </span>
+              )}
+            </td>
+            {odds?.total != null && (
+              <td className="ot-line">
+                <span>O {odds.total}{odds.over_price != null && <span className="odds-juice"> ({formatML(odds.over_price)})</span>}</span>
+              </td>
+            )}
+          </tr>
+          {/* Home row */}
+          <tr className="ot-row">
+            <td className="ot-team">
+              <div className="team-name">{game.home.display_name}</div>
+              <div className="team-record">
+                {game.home.stats?.record || ''} {game.home.stats?.ats ? `(${game.home.stats.ats} ATS)` : ''}
+              </div>
+            </td>
+            {hasScores && <td className="ot-score">{game.home.score}</td>}
+            <td className="ot-line">
+              {odds && (
+                <span className={odds.spread != null && odds.spread < 0 ? 'fav' : 'dog'}>
+                  {formatSpread(odds.spread)}
+                  {odds.spread_price != null && <span className="odds-juice"> ({formatML(odds.spread_price)})</span>}
+                </span>
+              )}
+            </td>
+            <td className="ot-line">
+              {odds && (
+                <span className={odds.ml != null && odds.ml < 0 ? 'fav' : 'dog'}>
+                  {formatML(odds.ml)}
+                </span>
+              )}
+            </td>
+            {odds?.total != null && (
+              <td className="ot-line">
+                <span>U {odds.total}{odds.under_price != null && <span className="odds-juice"> ({formatML(odds.under_price)})</span>}</span>
+              </td>
+            )}
+          </tr>
+        </tbody>
+      </table>
+      {odds?.bookmaker && (
+        <div className="odds-source">via {odds.bookmaker}</div>
       )}
 
       {expanded && (
         <div className="game-detail" onClick={e => e.stopPropagation()}>
+          <button className="collapse-btn" onClick={e => { e.stopPropagation(); setExpanded(false) }}>collapse</button>
           <GameBacktest game={game} />
           <OddsMovementChart gameId={game.game_id} />
         </div>
@@ -751,37 +880,93 @@ function GameCard({ game }: { game: Game }) {
 // ============================================================================
 
 function TodayDashboard() {
+  const todayStr = new Date().toISOString().slice(0, 10)
+  const [selectedDate, setSelectedDate] = useState(todayStr)
   const [data, setData] = useState<TodayData | null>(null)
+  const [gameDates, setGameDates] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
 
-  const fetchToday = useCallback(() => {
-    axios.get(`${API_BASE}/api/today`)
-      .then(r => { setData(r.data); setLoading(false) })
-      .catch(() => setLoading(false))
+  // Fetch list of all dates with games
+  useEffect(() => {
+    axios.get(`${API_BASE}/api/dates`).then(r => setGameDates(r.data)).catch(() => {})
   }, [])
 
-  useEffect(() => {
-    fetchToday()
-    const interval = setInterval(fetchToday, 60000)
-    return () => clearInterval(interval)
-  }, [fetchToday])
+  // Fetch games for selected date
+  const fetchGames = useCallback(() => {
+    setLoading(true)
+    if (selectedDate === todayStr) {
+      // Use live today endpoint for current date
+      axios.get(`${API_BASE}/api/today`)
+        .then(r => { setData(r.data); setLoading(false) })
+        .catch(() => {
+          // Fallback to game logs if today.json is empty
+          axios.get(`${API_BASE}/api/games/${selectedDate}`)
+            .then(r => { setData(r.data); setLoading(false) })
+            .catch(() => setLoading(false))
+        })
+    } else {
+      axios.get(`${API_BASE}/api/games/${selectedDate}`)
+        .then(r => { setData(r.data); setLoading(false) })
+        .catch(() => setLoading(false))
+    }
+  }, [selectedDate, todayStr])
 
-  if (loading) return <div className="loading">Loading today's games...</div>
-  if (!data || data.games.length === 0) {
-    return (
-      <div className="no-games">
-        No games found for today. Run ncaab_schedule_refresher.py to populate.
-      </div>
-    )
+  useEffect(() => {
+    fetchGames()
+    // Only auto-refresh if viewing today
+    if (selectedDate === todayStr) {
+      const interval = setInterval(fetchGames, 60000)
+      return () => clearInterval(interval)
+    }
+  }, [fetchGames, selectedDate, todayStr])
+
+  const shiftDate = (days: number) => {
+    const d = new Date(selectedDate + 'T12:00:00')
+    d.setDate(d.getDate() + days)
+    setSelectedDate(d.toISOString().slice(0, 10))
+  }
+
+  const jumpToNearestGame = (direction: number) => {
+    if (gameDates.length === 0) return
+    const idx = gameDates.indexOf(selectedDate)
+    if (direction < 0) {
+      // Find the previous date with games
+      const earlier = gameDates.filter(d => d < selectedDate)
+      if (earlier.length > 0) setSelectedDate(earlier[earlier.length - 1])
+    } else {
+      const later = gameDates.filter(d => d > selectedDate)
+      if (later.length > 0) setSelectedDate(later[0])
+    }
   }
 
   return (
     <div>
-      <div className="games-grid">
-        {data.games.map(game => (
-          <GameCard key={game.game_id} game={game} />
-        ))}
+      <div className="date-nav" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+        <button onClick={() => jumpToNearestGame(-1)} title="Previous date with games">&laquo;</button>
+        <button onClick={() => shiftDate(-1)}>&lsaquo;</button>
+        <input
+          type="date"
+          value={selectedDate}
+          onChange={e => setSelectedDate(e.target.value)}
+          style={{ fontFamily: 'inherit', fontSize: 'inherit', padding: '0.25rem 0.5rem' }}
+        />
+        <button onClick={() => shiftDate(1)}>&rsaquo;</button>
+        <button onClick={() => jumpToNearestGame(1)} title="Next date with games">&raquo;</button>
+        <button onClick={() => setSelectedDate(todayStr)}>Today</button>
+        {data && <span style={{ opacity: 0.6 }}>{data.game_count} game{data.game_count !== 1 ? 's' : ''}</span>}
       </div>
+
+      {loading ? (
+        <div className="loading">Loading games...</div>
+      ) : !data || data.games.length === 0 ? (
+        <div className="no-games">No games found for {selectedDate}.</div>
+      ) : (
+        <div className="games-grid">
+          {data.games.map(game => (
+            <GameCard key={game.game_id} game={game} />
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -990,7 +1175,7 @@ function BacktestPage() {
               <option value="">-- stat --</option>
               {Object.entries(columns).map(([group, cols]) => (
                 <optgroup key={group} label={group}>
-                  {cols.map(c => <option key={c} value={c}>{c}</option>)}
+                  {cols.map(c => <option key={c.col} value={c.col}>{c.label}</option>)}
                 </optgroup>
               ))}
             </select>

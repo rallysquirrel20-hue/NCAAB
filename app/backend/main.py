@@ -19,6 +19,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from scipy import stats
 
+from engine import BacktestEngine
+from models import SizedBacktestRequest, SizedBacktestResult
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -49,6 +52,8 @@ _cache: dict[str, Any] = {
     "game_logs_mtime": 0,
     "today": None,
     "today_mtime": 0,
+    "odds_history": None,
+    "odds_history_mtime": 0,
 }
 
 
@@ -75,11 +80,173 @@ def _get_today() -> dict:
     return _cache["today"]
 
 
+def _get_odds_history() -> pd.DataFrame:
+    if ODDS_HISTORY_FILE.exists():
+        mtime = ODDS_HISTORY_FILE.stat().st_mtime
+        if _cache["odds_history"] is None or mtime > _cache["odds_history_mtime"]:
+            _cache["odds_history"] = pd.read_parquet(ODDS_HISTORY_FILE)
+            _cache["odds_history_mtime"] = mtime
+    if _cache["odds_history"] is None:
+        return pd.DataFrame()
+    return _cache["odds_history"]
+
+
+# Build reverse lookup: canonical name -> odds API name
+_CANONICAL_TO_ODDS = {k: v for k, v in ODDS_NAME_MAP.items()}
+
+# Preferred bookmaker order
+_BOOK_PREF = ["bovada", "draftkings", "fanduel", "betmgm", "betrivers",
+              "williamhill_us", "fanatics", "betonlineag", "lowvig"]
+
+
+def _lookup_odds_for_game(home_canonical: str, away_canonical: str,
+                          commence_date: str) -> dict | None:
+    """Look up full odds (both sides) from the odds history for a game.
+
+    Returns a dict with spread/ml/total for both teams, or None if not found.
+    Uses the last pre-game snapshot (or latest available).
+    """
+    odf = _get_odds_history()
+    if odf.empty:
+        return None
+
+    home_odds_name = _CANONICAL_TO_ODDS.get(home_canonical, home_canonical)
+    away_odds_name = _CANONICAL_TO_ODDS.get(away_canonical, away_canonical)
+
+    mask = (
+        (odf["home_team"] == home_odds_name) & (odf["away_team"] == away_odds_name)
+    ) | (
+        (odf["home_team"] == away_odds_name) & (odf["away_team"] == home_odds_name)
+    )
+    game_df = odf[mask]
+    if game_df.empty:
+        return None
+
+    # Get the latest snapshot that's on or before the game date + 1 day
+    # (pre-game odds, not live in-game odds)
+    cutoff = f"{commence_date}T23:59:59Z"
+    pre_game = game_df[game_df["snapshot_time"] <= cutoff]
+    if pre_game.empty:
+        # Fall back to earliest snapshot if all are after game date
+        snap_time = game_df["snapshot_time"].min()
+    else:
+        snap_time = pre_game["snapshot_time"].max()
+
+    snap = game_df[game_df["snapshot_time"] == snap_time]
+
+    # Determine actual home/away from odds data
+    actual_home = snap["home_team"].iloc[0]
+    actual_away = snap["away_team"].iloc[0]
+
+    # Pick best available bookmaker
+    available_books = snap["bookmaker"].unique()
+    chosen_book = None
+    for b in _BOOK_PREF:
+        if b in available_books:
+            chosen_book = b
+            break
+    if chosen_book is None:
+        chosen_book = available_books[0]
+
+    book_rows = snap[snap["bookmaker"] == chosen_book]
+
+    result = {
+        "bookmaker": chosen_book,
+        "spread": None, "spread_price": None,
+        "away_spread": None, "away_spread_price": None,
+        "ml": None, "away_ml": None,
+        "total": None, "over_price": None, "under_price": None,
+    }
+
+    for _, row in book_rows.iterrows():
+        mkt = row["market"]
+        outcome = row["outcome"]
+        price = row["price"] if pd.notna(row["price"]) else None
+        point = row["point"] if pd.notna(row["point"]) else None
+
+        if mkt == "spreads":
+            if outcome == actual_home:
+                result["spread"] = point
+                result["spread_price"] = price
+            elif outcome == actual_away:
+                result["away_spread"] = point
+                result["away_spread_price"] = price
+        elif mkt == "h2h":
+            if outcome == actual_home:
+                result["ml"] = price
+            elif outcome == actual_away:
+                result["away_ml"] = price
+        elif mkt == "totals":
+            result["total"] = point
+            if outcome == "Over":
+                result["over_price"] = price
+            elif outcome == "Under":
+                result["under_price"] = price
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Backtest engine (adapted from ncaab_backtest.py)
 # ---------------------------------------------------------------------------
 
 JUICE = -110
+
+
+def _enrich_with_ranks(df: pd.DataFrame) -> pd.DataFrame:
+    """Add rank columns for each ranked stat, computed per-date among tracked teams.
+
+    Adds columns like rank_team_win_pct, rank_opp_win_pct for use in filters.
+    """
+    tracked = df[df["is_tracked"] == True].copy()
+    if tracked.empty:
+        return df
+
+    dates = sorted(tracked["date"].unique())
+
+    # Build a lookup: for each (date, team) -> ranks
+    # We compute ranks cumulatively: for each date, rank all teams by their
+    # latest PIT stats up to and including that date.
+    all_rank_rows = []
+
+    for date in dates:
+        rankings = _compute_rankings(date)
+        day_rows = tracked[tracked["date"] == date]
+        for idx, row in day_rows.iterrows():
+            team = row["team"]
+            opponent = row.get("opponent", "")
+            team_ranks = rankings.get(team, {})
+            # Find opponent's canonical name — check if they're tracked
+            opp_ranks = {}
+            for opp_name, opp_r in rankings.items():
+                if opp_name == opponent or opponent.startswith(opp_name):
+                    opp_ranks = opp_r
+                    break
+            # Also try matching via the tracked rows for this event
+            if not opp_ranks:
+                opp_tracked = day_rows[
+                    (day_rows["event_id"] == row.get("event_id"))
+                    & (day_rows["team"] != team)
+                ]
+                if not opp_tracked.empty:
+                    opp_name = opp_tracked.iloc[0]["team"]
+                    opp_ranks = rankings.get(opp_name, {})
+
+            rank_data = {"_idx": idx}
+            for stat in _RANKED_STATS:
+                if stat in team_ranks:
+                    rank_data[f"rank_{stat}"] = team_ranks[stat]
+                opp_stat = stat.replace("team_", "opp_", 1)
+                if stat in opp_ranks:
+                    rank_data[f"rank_{opp_stat}"] = opp_ranks[stat]
+            all_rank_rows.append(rank_data)
+
+    if not all_rank_rows:
+        return df
+
+    rank_df = pd.DataFrame(all_rank_rows).set_index("_idx")
+    df = df.join(rank_df, how="left")
+    return df
 
 
 def _load_testable_games(df: pd.DataFrame) -> pd.DataFrame:
@@ -94,6 +261,7 @@ def _load_testable_games(df: pd.DataFrame) -> pd.DataFrame:
     df["ats_margin"] = df["margin"] + df["closing_fg_spread"].astype(float)
     df["covered"] = df["ats_margin"] > 0
     df["push"] = df["ats_margin"] == 0
+    df = _enrich_with_ranks(df)
     return df
 
 
@@ -398,127 +566,430 @@ def get_today():
     return _get_today()
 
 
+def _safe_float(val):
+    if pd.notna(val):
+        try:
+            return round(float(val), 2)
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+def _safe_int(val):
+    if pd.notna(val):
+        try:
+            return int(float(val))
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+# Stats where higher = better, and stats where lower = better
+_RANKED_STATS = {
+    "team_win_pct": True,
+    "team_ppg": True,
+    "opp_ppg": False,       # points allowed — lower is better
+    "team_ats_win_pct": True,
+    "team_3pt_pct": True,
+    "team_ft_pct": True,
+    "team_2pt_pct": True,
+    "team_pace": True,
+    "team_sos": True,
+    "team_oreb_pg": True,
+    "team_dreb_pg": True,
+    "team_to_pg": False,     # turnovers — lower is better
+    "team_forced_to_pg": True,
+    "team_def_3pt_pct": False,  # opponent shooting allowed — lower is better
+    "team_def_2pt_pct": False,
+}
+
+_rankings_cache: dict[str, dict] = {}
+
+
+def _compute_rankings(date: str) -> dict[str, dict[str, int]]:
+    """Compute per-stat rank (1=best) for all tracked teams as of a date.
+
+    Returns {team_name: {stat: rank}}.
+    """
+    if date in _rankings_cache:
+        return _rankings_cache[date]
+
+    df = _get_game_logs()
+    if df.empty:
+        return {}
+
+    tracked = df[(df["is_tracked"] == True) & (df["date"] <= date)].copy()
+    if tracked.empty:
+        return {}
+
+    # Get each team's latest row on or before this date
+    tracked = tracked.sort_values("date")
+    latest = tracked.groupby("team").last()
+
+    rankings: dict[str, dict[str, int]] = {team: {} for team in latest.index}
+
+    for stat, higher_is_better in _RANKED_STATS.items():
+        if stat not in latest.columns:
+            continue
+        vals = pd.to_numeric(latest[stat], errors="coerce")
+        ranked = vals.rank(ascending=not higher_is_better, method="min", na_option="bottom")
+        for team in latest.index:
+            r = ranked.get(team)
+            if pd.notna(r) and pd.notna(vals.get(team)):
+                rankings[team][stat] = int(r)
+
+    _rankings_cache[date] = rankings
+    return rankings
+
+
+def _build_record(r, prefix="team"):
+    """Build 'W-L' string from games + win_pct."""
+    games = _safe_int(r.get(f"{prefix}_games"))
+    wp = _safe_float(r.get(f"{prefix}_win_pct"))
+    if games and wp is not None:
+        wins = round(games * wp)
+        return f"{wins}-{games - wins}"
+    return None
+
+
+def _build_ats(r, prefix="team"):
+    """Build 'W-L' ATS string from ats_games + ats_win_pct."""
+    ag = _safe_int(r.get(f"{prefix}_ats_games"))
+    ap = _safe_float(r.get(f"{prefix}_ats_win_pct"))
+    if ag and ap is not None:
+        aw = round(ag * ap)
+        return f"{aw}-{ag - aw}"
+    return None
+
+
+def _build_side(r, rankings: dict[str, dict[str, int]] | None = None):
+    """Build a full side dict from a game log row."""
+    team_name = r["team"]
+    team_ranks = rankings.get(team_name, {}) if rankings else {}
+
+    stat_keys = [
+        "team_win_pct", "team_ppg", "opp_ppg", "team_ats_win_pct",
+        "team_3pt_pct", "team_ft_pct", "team_2pt_pct",
+        "team_pace", "team_sos", "team_oreb_pg", "team_dreb_pg",
+        "team_to_pg", "team_forced_to_pg", "team_def_3pt_pct", "team_def_2pt_pct",
+    ]
+    stats: dict[str, Any] = {
+        "record": _build_record(r),
+        "ats": _build_ats(r),
+    }
+    ranks: dict[str, int] = {}
+    for k in stat_keys:
+        stats[k] = _safe_float(r.get(k))
+        if k in team_ranks:
+            ranks[k] = team_ranks[k]
+
+    return {
+        "name": team_name,
+        "display_name": team_name,
+        "abbreviation": "",
+        "id": str(r.get("event_id", "")),
+        "score": _safe_int(r.get("team_score")),
+        "is_tracked": True,
+        "stats": stats,
+        "ranks": ranks,
+    }
+
+
+def _build_untracked_side(r):
+    """Build a side dict for an untracked opponent."""
+    return {
+        "name": r["opponent"],
+        "display_name": r.get("opponent_short", r["opponent"]),
+        "abbreviation": "",
+        "id": "",
+        "score": _safe_int(r.get("opp_score")),
+        "is_tracked": False,
+        "stats": {},
+    }
+
+
+@app.get("/api/games/{date}")
+def get_games_by_date(date: str):
+    """Return all tracked games for a specific date (YYYY-MM-DD)."""
+    df = _get_game_logs()
+    if df.empty:
+        return {"date": date, "games": [], "game_count": 0}
+
+    day_df = df[(df["date"] == date) & (df["is_tracked"] == True)].copy()
+    if day_df.empty:
+        return {"date": date, "games": [], "game_count": 0}
+
+    rankings = _compute_rankings(date)
+
+    seen_events = set()
+    games = []
+    for _, row in day_df.iterrows():
+        eid = row.get("event_id", "")
+        if eid in seen_events:
+            continue
+        seen_events.add(eid)
+
+        # Find opponent row if they're also tracked
+        opp_rows = day_df[
+            (day_df["event_id"] == eid) & (day_df["team"] != row["team"])
+        ]
+        opp_row = opp_rows.iloc[0] if not opp_rows.empty else None
+
+        # Determine home/away from the row's perspective
+        ha = row.get("home_away", "home")
+        is_neutral = bool(row.get("neutral_site", False))
+
+        if ha == "home" or ha == "neutral":
+            home_side = _build_side(row, rankings)
+            away_side = _build_side(opp_row, rankings) if opp_row is not None else _build_untracked_side(row)
+        else:
+            away_side = _build_side(row, rankings)
+            home_side = _build_side(opp_row, rankings) if opp_row is not None else _build_untracked_side(row)
+
+        # Build odds: prefer odds history (has both sides + totals + juice),
+        # fall back to game logs (closing spread/ML only)
+        home_name = home_side["name"]
+        away_name = away_side["name"]
+        live_odds = _lookup_odds_for_game(home_name, away_name, date)
+
+        if live_odds:
+            odds_obj = {
+                "spread": live_odds["spread"],
+                "spread_price": live_odds["spread_price"],
+                "away_spread": live_odds["away_spread"],
+                "away_spread_price": live_odds["away_spread_price"],
+                "ml": live_odds["ml"],
+                "away_ml": live_odds["away_ml"],
+                "total": live_odds["total"],
+                "over_price": live_odds["over_price"],
+                "under_price": live_odds["under_price"],
+                "bookmaker": live_odds["bookmaker"],
+            }
+        else:
+            # Fallback to game logs
+            home_row = row if ha in ("home", "neutral") else (opp_row if opp_row is not None else row)
+            away_row = opp_row if ha in ("home", "neutral") else row
+            home_closing_spread = _safe_float(home_row.get("closing_fg_spread"))
+            away_closing_spread = -home_closing_spread if home_closing_spread is not None else None
+            odds_obj = {
+                "spread": home_closing_spread,
+                "spread_price": None,
+                "away_spread": away_closing_spread,
+                "away_spread_price": None,
+                "ml": _safe_float(home_row.get("closing_fg_ml")),
+                "away_ml": _safe_float(away_row.get("closing_fg_ml")) if away_row is not None else None,
+                "total": None,
+                "over_price": None,
+                "under_price": None,
+                "bookmaker": None,
+            }
+
+        game = {
+            "game_id": eid,
+            "commence_time": f"{date}T00:00:00Z",
+            "date": date,
+            "status": "STATUS_FINAL",
+            "status_detail": "Final",
+            "neutral_site": is_neutral,
+            "home": home_side,
+            "away": away_side,
+            "odds": odds_obj,
+        }
+        games.append(game)
+
+    return {"date": date, "games": games, "game_count": len(games)}
+
+
+@app.get("/api/dates")
+def get_game_dates():
+    """Return all dates that have tracked games, sorted."""
+    df = _get_game_logs()
+    if df.empty:
+        return []
+    tracked = df[df["is_tracked"] == True]
+    dates = sorted(tracked["date"].unique().tolist())
+    return dates
+
+
+def _find_game_teams(game_id: str) -> tuple[str, str] | None:
+    """Find home/away canonical names for a game_id from game logs."""
+    df = _get_game_logs()
+    if df.empty:
+        return None
+    rows = df[df["event_id"] == game_id]
+    if rows.empty:
+        return None
+    # Get one row and determine home/away
+    for _, r in rows.iterrows():
+        ha = r.get("home_away", "home")
+        if ha in ("home", "neutral"):
+            home = r["team"]
+            away = r["opponent"] if r.get("opponent_short") is None else r["opponent"]
+            # Try to find tracked opponent name
+            opp_rows = rows[rows["team"] != r["team"]]
+            if not opp_rows.empty:
+                away = opp_rows.iloc[0]["team"]
+            return (home, away)
+        else:
+            away = r["team"]
+            opp_rows = rows[rows["team"] != r["team"]]
+            if not opp_rows.empty:
+                home = opp_rows.iloc[0]["team"]
+            else:
+                home = r["opponent"]
+            return (home, away)
+    return None
+
+
 @app.get("/api/today/{game_id}/odds")
+@app.get("/api/game/{game_id}/odds")
 def get_game_odds(game_id: str):
-    """Return odds movement history for a specific game."""
-    if not ODDS_HISTORY_FILE.exists():
-        return {"game_id": game_id, "snapshots": []}
+    """Return odds movement timeline for a game (flat format for charting)."""
+    teams = _find_game_teams(game_id)
+    if not teams:
+        return {"game_id": game_id, "home": "", "away": "", "timeline": []}
 
-    # Find the game in today's data to get commence_time and team names
-    today = _get_today()
-    game = None
-    for g in today.get("games", []):
-        if g["game_id"] == game_id:
-            game = g
-            break
+    home_canonical, away_canonical = teams
+    home_odds_name = _CANONICAL_TO_ODDS.get(home_canonical, home_canonical)
+    away_odds_name = _CANONICAL_TO_ODDS.get(away_canonical, away_canonical)
 
-    if not game:
-        raise HTTPException(404, f"Game {game_id} not found in today's data")
+    odf = _get_odds_history()
+    if odf.empty:
+        return {"game_id": game_id, "home": home_canonical, "away": away_canonical, "timeline": []}
 
-    home_name = game["home"]["display_name"]
-    away_name = game["away"]["display_name"]
-
-    # Also try odds API names
-    home_odds = ODDS_NAME_MAP.get(game["home"]["name"], game["home"]["name"])
-    away_odds = ODDS_NAME_MAP.get(game["away"]["name"], game["away"]["name"])
-
-    # Read odds history — filter for this game's teams
-    try:
-        df = pd.read_parquet(ODDS_HISTORY_FILE)
-    except Exception:
-        return {"game_id": game_id, "snapshots": []}
-
-    # Match by home_team/away_team columns
     mask = (
-        (df["home_team"].str.lower().isin([
-            home_name.lower(), home_odds.lower(),
-            game["home"]["name"].lower()
-        ]))
-        & (df["away_team"].str.lower().isin([
-            away_name.lower(), away_odds.lower(),
-            game["away"]["name"].lower()
-        ]))
+        (odf["home_team"] == home_odds_name) & (odf["away_team"] == away_odds_name)
+    ) | (
+        (odf["home_team"] == away_odds_name) & (odf["away_team"] == home_odds_name)
     )
-    matched = df[mask]
-
+    matched = odf[mask]
     if matched.empty:
-        return {"game_id": game_id, "snapshots": [], "home": home_name, "away": away_name}
+        return {"game_id": game_id, "home": home_canonical, "away": away_canonical, "timeline": []}
 
-    # Group by snapshot_time for line movement
-    snapshots = []
+    actual_home = matched["home_team"].iloc[0]
+    actual_away = matched["away_team"].iloc[0]
+
+    # Build a flat timeline: one entry per snapshot with best-book odds
+    timeline = []
     for snap_time, group in matched.groupby("snapshot_time"):
-        snap = {"time": snap_time, "bookmakers": {}}
-        for _, row in group.iterrows():
-            bm = row["bookmaker"]
-            if bm not in snap["bookmakers"]:
-                snap["bookmakers"][bm] = {}
+        # Pick preferred bookmaker
+        available = group["bookmaker"].unique()
+        chosen = None
+        for b in _BOOK_PREF:
+            if b in available:
+                chosen = b
+                break
+        if not chosen:
+            chosen = available[0]
+
+        book_rows = group[group["bookmaker"] == chosen]
+        entry = {"time": snap_time, "bookmaker": chosen}
+
+        for _, row in book_rows.iterrows():
             mkt = row["market"]
-            if mkt not in snap["bookmakers"][bm]:
-                snap["bookmakers"][bm][mkt] = []
-            snap["bookmakers"][bm][mkt].append({
-                "outcome": row["outcome"],
-                "price": row.get("price"),
-                "point": row.get("point"),
-            })
-        snapshots.append(snap)
+            outcome = row["outcome"]
+            price = float(row["price"]) if pd.notna(row["price"]) else None
+            point = float(row["point"]) if pd.notna(row["point"]) else None
+
+            if mkt == "spreads":
+                if outcome == actual_home:
+                    entry["home_spread"] = point
+                    entry["home_spread_price"] = price
+                elif outcome == actual_away:
+                    entry["away_spread"] = point
+                    entry["away_spread_price"] = price
+            elif mkt == "h2h":
+                if outcome == actual_home:
+                    entry["home_ml"] = price
+                elif outcome == actual_away:
+                    entry["away_ml"] = price
+            elif mkt == "totals":
+                entry["total"] = point
+                if outcome == "Over":
+                    entry["over_price"] = price
+                elif outcome == "Under":
+                    entry["under_price"] = price
+
+        timeline.append(entry)
+
+    timeline.sort(key=lambda x: x["time"])
 
     return {
         "game_id": game_id,
-        "home": home_name,
-        "away": away_name,
-        "snapshot_count": len(snapshots),
-        "snapshots": snapshots,
+        "home": home_canonical,
+        "away": away_canonical,
+        "snapshot_count": len(timeline),
+        "timeline": timeline,
     }
 
 
 @app.get("/api/today/{game_id}/matchup")
+@app.get("/api/game/{game_id}/matchup")
 def get_game_matchup(game_id: str):
     """Return PIT stats comparison for both teams in a game."""
-    today = _get_today()
-    game = None
-    for g in today.get("games", []):
-        if g["game_id"] == game_id:
-            game = g
-            break
-
-    if not game:
+    teams = _find_game_teams(game_id)
+    if not teams:
         raise HTTPException(404, f"Game {game_id} not found")
+
+    home_canonical, away_canonical = teams
 
     df = _get_game_logs()
     if df.empty:
         return {"game_id": game_id, "home": {}, "away": {}}
 
+    pit_keys = [
+        "team_games", "team_win_pct", "team_ppg", "opp_ppg",
+        "team_ats_games", "team_ats_win_pct",
+        "team_ft_pct", "team_3pt_pct", "team_2pt_pct",
+        "team_def_ft_pct", "team_def_3pt_pct", "team_def_2pt_pct",
+        "team_oreb_pg", "team_dreb_pg",
+        "team_to_pg", "team_forced_to_pg",
+        "team_pace", "team_sos",
+        "team_home_win_pct", "team_away_win_pct",
+        "team_home_ppg", "team_away_ppg",
+    ]
+
+    # Determine game date for rankings
+    game_date = None
+    tracked = df[df["event_id"] == game_id]
+    if not tracked.empty:
+        game_date = tracked.iloc[0]["date"]
+
+    rankings = _compute_rankings(game_date) if game_date else {}
+
     result = {"game_id": game_id}
-    for side in ("home", "away"):
-        name = game[side]["name"]
+    for side, name in [("home", home_canonical), ("away", away_canonical)]:
         team_rows = df[(df["team"] == name) & (df["is_tracked"] == True)]
         if team_rows.empty:
-            result[side] = {"name": name, "stats": {}}
+            result[side] = {"name": name, "stats": {}, "ranks": {}}
             continue
 
-        latest = team_rows.sort_values("date").iloc[-1]
-        stats_dict = {"name": name, "conference": CONFERENCE_MAP.get(name, "")}
+        # Get the row for this specific game if possible, otherwise latest
+        game_rows = team_rows[team_rows["event_id"] == game_id]
+        if not game_rows.empty:
+            row = game_rows.iloc[0]
+        else:
+            row = team_rows.sort_values("date").iloc[-1]
 
-        pit_keys = [
-            "team_games", "team_win_pct", "team_ppg", "opp_ppg",
-            "team_ats_games", "team_ats_win_pct",
-            "team_ft_pct", "team_3pt_pct", "team_2pt_pct",
-            "team_def_ft_pct", "team_def_3pt_pct", "team_def_2pt_pct",
-            "team_oreb_pg", "team_dreb_pg",
-            "team_to_pg", "team_forced_to_pg",
-            "team_pace", "team_sos",
-            "team_home_win_pct", "team_away_win_pct",
-            "team_home_ppg", "team_away_ppg",
-        ]
+        team_ranks = rankings.get(name, {})
+        stats_dict = {
+            "name": name,
+            "conference": CONFERENCE_MAP.get(name, ""),
+            "record": _build_record(row),
+            "ats": _build_ats(row),
+        }
+        ranks_dict = {}
         for key in pit_keys:
-            val = latest.get(key)
+            val = row.get(key)
             if pd.notna(val) and val != "":
                 try:
                     stats_dict[key] = round(float(val), 2)
                 except (ValueError, TypeError):
                     stats_dict[key] = val
+            if key in team_ranks:
+                ranks_dict[key] = team_ranks[key]
 
-        result[side] = stats_dict
+        result[side] = {**stats_dict, "ranks": ranks_dict}
 
     return result
 
@@ -790,7 +1261,86 @@ def get_columns():
             {"col": "home_away", "label": "Home/Away"},
             {"col": "conference_game", "label": "Conference Game"},
         ],
+        "ranks": [
+            {"col": "rank_team_win_pct", "label": "Team Win % Rank"},
+            {"col": "rank_team_ppg", "label": "Team PPG Rank"},
+            {"col": "rank_team_ats_win_pct", "label": "Team ATS % Rank"},
+            {"col": "rank_team_3pt_pct", "label": "Team 3PT % Rank"},
+            {"col": "rank_team_ft_pct", "label": "Team FT % Rank"},
+            {"col": "rank_team_2pt_pct", "label": "Team 2PT % Rank"},
+            {"col": "rank_team_pace", "label": "Team Pace Rank"},
+            {"col": "rank_team_sos", "label": "Team SOS Rank"},
+            {"col": "rank_team_oreb_pg", "label": "Team OREB/G Rank"},
+            {"col": "rank_team_dreb_pg", "label": "Team DREB/G Rank"},
+            {"col": "rank_team_to_pg", "label": "Team TO/G Rank"},
+            {"col": "rank_team_forced_to_pg", "label": "Team Forced TO/G Rank"},
+            {"col": "rank_team_def_3pt_pct", "label": "Team Def 3PT % Rank"},
+            {"col": "rank_team_def_2pt_pct", "label": "Team Def 2PT % Rank"},
+            {"col": "rank_opp_win_pct", "label": "Opp Win % Rank"},
+            {"col": "rank_opp_ppg", "label": "Opp PPG Rank"},
+            {"col": "rank_opp_ats_win_pct", "label": "Opp ATS % Rank"},
+            {"col": "rank_opp_3pt_pct", "label": "Opp 3PT % Rank"},
+            {"col": "rank_opp_ft_pct", "label": "Opp FT % Rank"},
+            {"col": "rank_opp_2pt_pct", "label": "Opp 2PT % Rank"},
+            {"col": "rank_opp_pace", "label": "Opp Pace Rank"},
+            {"col": "rank_opp_sos", "label": "Opp SOS Rank"},
+            {"col": "rank_opp_oreb_pg", "label": "Opp OREB/G Rank"},
+            {"col": "rank_opp_dreb_pg", "label": "Opp DREB/G Rank"},
+            {"col": "rank_opp_to_pg", "label": "Opp TO/G Rank"},
+            {"col": "rank_opp_forced_to_pg", "label": "Opp Forced TO/G Rank"},
+            {"col": "rank_opp_def_3pt_pct", "label": "Opp Def 3PT % Rank"},
+            {"col": "rank_opp_def_2pt_pct", "label": "Opp Def 2PT % Rank"},
+        ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Sized Backtest (from NCAAB_Bets engine)
+# ---------------------------------------------------------------------------
+
+
+def _get_engine() -> BacktestEngine:
+    """Get a BacktestEngine instance using cached game logs."""
+    df = _get_game_logs()
+    if df.empty:
+        raise HTTPException(500, "No game data loaded")
+    return BacktestEngine(df, NCAAB_DIR)
+
+
+@app.post("/api/backtest/sized", response_model=SizedBacktestResult)
+def run_sized_backtest(req: SizedBacktestRequest):
+    """Run a backtest with bet sizing strategies (flat, martingale, d'alembert, kelly, units)."""
+    engine = _get_engine()
+    result = engine.run(req)
+    if result is None:
+        raise HTTPException(400, "No games matched the selected filters.")
+    return result
+
+
+@app.get("/api/stats")
+def get_available_stats():
+    """Return all numeric columns available for filtering."""
+    df = _get_game_logs()
+    if df.empty:
+        return []
+    testable = _load_testable_games(df)
+    numeric_cols = testable.select_dtypes(include=["number"]).columns.tolist()
+    return sorted(numeric_cols)
+
+
+@app.post("/api/strategies/save")
+def save_strategy(req: SizedBacktestRequest):
+    """Save a strategy configuration for later use."""
+    engine = _get_engine()
+    engine.save_strategy(req.model_dump())
+    return {"status": "saved"}
+
+
+@app.get("/api/strategies/saved")
+def list_saved_strategies():
+    """List all saved strategy configurations."""
+    engine = _get_engine()
+    return engine.load_strategies()
 
 
 # ---------------------------------------------------------------------------

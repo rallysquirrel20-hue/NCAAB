@@ -11,6 +11,8 @@
 
   --green: #859900;
   --red: #dc322f;
+  --color-pink: rgb(255, 50, 150);
+  --color-blue: rgb(50, 50, 255);
   --blue: #268bd2;
   --cyan: #2aa198;
   --orange: #cb4b16;
@@ -105,14 +107,14 @@ html, body, #root {
 /* Today's Dashboard */
 .games-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(560px, 1fr));
+  gap: 10px;
 }
 
 .game-card {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  padding: 12px;
+  padding: 8px 10px;
   cursor: pointer;
   transition: border-color 0.15s;
 }
@@ -126,20 +128,8 @@ html, body, #root {
   cursor: default;
 }
 
-.game-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-}
-
-.game-time {
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
 .game-status {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: bold;
 }
 
@@ -147,76 +137,117 @@ html, body, #root {
 .game-status.final { color: var(--text-muted); }
 .game-status.scheduled { color: var(--blue); }
 
-.game-teams {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
+/* Odds table (Bovada-style) */
+.odds-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
 }
 
-.team-side {
-  flex: 1;
-  text-align: center;
+.odds-table thead th {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 0 8px 6px;
+  border-bottom: 1px solid var(--border-color);
 }
 
-.team-side.away { text-align: left; }
-.team-side.home { text-align: right; }
+.odds-table th.ot-meta,
+.odds-table th.ot-team { text-align: left; }
+.odds-table th.ot-line,
+.odds-table th.ot-score { text-align: center; }
+
+.ot-row td { padding: 6px 8px; }
+.ot-row:first-child td { padding-top: 8px; }
+.ot-row + .ot-row td { border-top: 1px solid var(--border-color); border-top-style: dotted; }
+
+td.ot-meta {
+  width: 80px;
+  vertical-align: top;
+  border-right: 1px solid var(--border-color);
+}
+
+.ot-date {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.ot-neutral {
+  font-size: 9px;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-top: 2px;
+}
+
+td.ot-team {
+  width: 100%;
+}
 
 .team-name {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: bold;
   color: var(--text-bold);
 }
 
 .team-record {
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.team-score {
-  font-size: 24px;
-  font-weight: bold;
-  color: var(--text-bold);
-}
-
-.vs-divider {
-  font-size: 12px;
-  color: var(--text-muted);
-  padding: 0 8px;
-}
-
-.game-odds {
-  display: flex;
-  justify-content: center;
-  gap: 16px;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border-color);
-  font-size: 12px;
-}
-
-.odds-item {
-  text-align: center;
-}
-
-.odds-label {
-  color: var(--text-muted);
   font-size: 10px;
+  color: var(--text-muted);
 }
 
-.odds-value {
+td.ot-score {
+  text-align: center;
+  font-size: 18px;
   font-weight: bold;
   color: var(--text-bold);
+  width: 50px;
 }
 
-.odds-value.fav { color: var(--red); }
-.odds-value.dog { color: var(--green); }
+td.ot-line {
+  text-align: center;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text-bold);
+  padding-left: 4px !important;
+  padding-right: 4px !important;
+}
+
+.fav { color: var(--color-blue); }
+.dog { color: var(--color-pink); }
+
+.odds-juice { font-size: 11px; opacity: 0.55; }
+.odds-source { font-size: 10px; opacity: 0.35; text-align: right; padding: 2px 8px 0; }
 
 /* Expanded game detail */
 .game-detail {
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px solid var(--border-color);
+}
+
+/* Chart view toggle */
+.chart-view-toggle {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.chart-view-toggle button {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-main);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.chart-view-toggle button.active {
+  background: var(--base01);
+  color: var(--base3);
+  border-color: var(--base01);
 }
 
 /* Matchup table */
@@ -226,45 +257,63 @@ html, body, #root {
   font-size: 12px;
 }
 
-.matchup-table th {
-  text-align: center;
-  padding: 4px 8px;
-  border-bottom: 1px solid var(--border-color);
-  color: var(--text-bold);
-}
-
+.matchup-table th,
 .matchup-table td {
   padding: 3px 8px;
   text-align: center;
 }
 
-.matchup-table td:first-child {
-  text-align: right;
+.matchup-table th {
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-bold);
+}
+
+.mu-rank {
+  width: 40px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: normal !important;
+}
+
+.mu-val {
   font-weight: bold;
 }
 
-.matchup-table td:nth-child(2) {
+.mu-label {
   color: var(--text-muted);
   font-size: 11px;
-}
-
-.matchup-table td:last-child {
-  text-align: left;
-  font-weight: bold;
+  font-weight: normal !important;
 }
 
 .stat-better {
-  color: var(--green);
+  color: var(--color-blue);
 }
 
 .stat-worse {
-  color: var(--red);
+  color: var(--color-pink);
 }
 
 /* Odds movement chart container */
 .odds-chart-container {
+  margin-top: 8px;
+  margin-bottom: 16px;
+  height: 220px;
+}
+
+.odds-timeline-table {
   margin-top: 12px;
-  height: 200px;
+  border-top: 1px solid var(--border-color);
+  padding-top: 8px;
+}
+
+.odds-timeline-table thead th {
+  position: sticky;
+  top: -1px;
+  background: var(--bg-card);
+  z-index: 2;
+  border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+  box-shadow: 0 1px 0 var(--border-color), 0 -1px 0 var(--border-color);
 }
 
 /* Backtest Page */
@@ -361,8 +410,8 @@ html, body, #root {
   color: var(--text-bold);
 }
 
-.result-stat .value.positive { color: var(--green); }
-.result-stat .value.negative { color: var(--red); }
+.result-stat .value.positive { color: var(--color-blue); }
+.result-stat .value.negative { color: var(--color-pink); }
 
 /* Strategy table */
 .strategy-table {
@@ -396,7 +445,7 @@ html, body, #root {
 }
 
 .profitable {
-  color: var(--green);
+  color: var(--color-blue);
   font-weight: bold;
 }
 
@@ -432,8 +481,8 @@ html, body, #root {
   border-bottom: 1px solid var(--bg-card);
 }
 
-.covered { color: var(--green); }
-.missed { color: var(--red); }
+.covered { color: var(--color-blue); }
+.missed { color: var(--color-pink); }
 
 /* No games message */
 .no-games {
