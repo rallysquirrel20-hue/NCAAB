@@ -107,7 +107,7 @@ interface ColumnGroups {
   [group: string]: ColEntry[]
 }
 
-type View = 'today' | 'backtest'
+type View = 'scores' | 'team' | 'backtest'
 
 // ============================================================================
 // Helpers
@@ -938,6 +938,143 @@ function GameCard({ game }: { game: Game }) {
 }
 
 // ============================================================================
+// CalendarPicker Component
+// ============================================================================
+
+function CalendarPicker({
+  selectedDate,
+  onSelect,
+  gameDates,
+  todayStr,
+}: {
+  selectedDate: string
+  onSelect: (date: string) => void
+  gameDates: Array<{ date: string; games: number }>
+  todayStr: string
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  // Derive viewed month from selectedDate
+  const sel = new Date(selectedDate + 'T12:00:00')
+  const [viewYear, setViewYear] = useState(sel.getFullYear())
+  const [viewMonth, setViewMonth] = useState(sel.getMonth())
+
+  // Build a lookup: "YYYY-MM-DD" -> game count
+  const gameMap = useRef<Record<string, number>>({})
+  gameMap.current = {}
+  for (const d of gameDates) gameMap.current[d.date] = d.games
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  // Sync viewed month when selectedDate changes externally
+  useEffect(() => {
+    const d = new Date(selectedDate + 'T12:00:00')
+    setViewYear(d.getFullYear())
+    setViewMonth(d.getMonth())
+  }, [selectedDate])
+
+  const shiftMonth = (delta: number) => {
+    let m = viewMonth + delta
+    let y = viewYear
+    if (m < 0) { m = 11; y-- }
+    if (m > 11) { m = 0; y++ }
+    setViewMonth(m)
+    setViewYear(y)
+  }
+
+  // Build calendar grid
+  const firstDay = new Date(viewYear, viewMonth, 1).getDay() // 0=Sun
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate()
+  const prevMonthDays = new Date(viewYear, viewMonth, 0).getDate()
+
+  const cells: Array<{ date: string; day: number; inMonth: boolean }> = []
+  // Leading days from previous month
+  for (let i = firstDay - 1; i >= 0; i--) {
+    const d = prevMonthDays - i
+    const m = viewMonth === 0 ? 12 : viewMonth
+    const y = viewMonth === 0 ? viewYear - 1 : viewYear
+    const ds = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+    cells.push({ date: ds, day: d, inMonth: false })
+  }
+  // Current month
+  for (let d = 1; d <= daysInMonth; d++) {
+    const ds = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+    cells.push({ date: ds, day: d, inMonth: true })
+  }
+  // Trailing days
+  const trailing = 7 - (cells.length % 7)
+  if (trailing < 7) {
+    for (let d = 1; d <= trailing; d++) {
+      const m = viewMonth === 11 ? 1 : viewMonth + 2
+      const y = viewMonth === 11 ? viewYear + 1 : viewYear
+      const ds = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+      cells.push({ date: ds, day: d, inMonth: false })
+    }
+  }
+
+  const monthLabel = new Date(viewYear, viewMonth, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+  const selectedLabel = new Date(selectedDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+  const selectedGames = gameMap.current[selectedDate] || 0
+
+  return (
+    <div className="cal-wrapper" ref={ref}>
+      <button className="cal-trigger" onClick={() => setOpen(!open)}>
+        {selectedLabel}{selectedGames > 0 ? ` — ${selectedGames} game${selectedGames !== 1 ? 's' : ''}` : ''}
+        {selectedDate === todayStr ? ' (today)' : ''}
+        <span className="cal-caret">{open ? '\u25B2' : '\u25BC'}</span>
+      </button>
+      {open && (
+        <div className="cal-dropdown">
+          <div className="cal-header">
+            <button onClick={() => shiftMonth(-1)}>&lsaquo;</button>
+            <span className="cal-month-label">{monthLabel}</span>
+            <button onClick={() => shiftMonth(1)}>&rsaquo;</button>
+          </div>
+          <div className="cal-grid">
+            {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
+              <div key={d} className="cal-dow">{d}</div>
+            ))}
+            {cells.map((c, i) => {
+              const games = gameMap.current[c.date] || 0
+              const isSelected = c.date === selectedDate
+              const isToday = c.date === todayStr
+              return (
+                <button
+                  key={i}
+                  className={[
+                    'cal-cell',
+                    !c.inMonth && 'cal-outside',
+                    isSelected && 'cal-selected',
+                    isToday && 'cal-today',
+                    games > 0 && 'cal-has-games',
+                  ].filter(Boolean).join(' ')}
+                  onClick={() => { onSelect(c.date); setOpen(false) }}
+                >
+                  <span className="cal-day">{c.day}</span>
+                  {games > 0 && <span className="cal-games">{games}</span>}
+                </button>
+              )
+            })}
+          </div>
+          <div className="cal-footer">
+            <button onClick={() => { onSelect(todayStr); setOpen(false) }}>Today</button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ============================================================================
 // TodayDashboard Component
 // ============================================================================
 
@@ -1079,19 +1216,13 @@ function TodayDashboard() {
     <div>
       <div className="date-nav" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
         <button onClick={() => jumpToNearestGame(-1)} title="Previous date with games">&laquo;</button>
-        <select
-          className="date-select"
-          value={selectedDate}
-          onChange={e => setSelectedDate(e.target.value)}
-        >
-          {gameDates.map(d => (
-            <option key={d.date} value={d.date}>
-              {formatDateLabel(d.date)} — {d.games} game{d.games !== 1 ? 's' : ''}{d.date === todayStr ? ' (today)' : ''}
-            </option>
-          ))}
-        </select>
+        <CalendarPicker
+          selectedDate={selectedDate}
+          onSelect={setSelectedDate}
+          gameDates={gameDates}
+          todayStr={todayStr}
+        />
         <button onClick={() => jumpToNearestGame(1)} title="Next date with games">&raquo;</button>
-        <button onClick={() => setSelectedDate(todayStr)}>Today</button>
       </div>
 
       {loading ? (
@@ -1514,11 +1645,104 @@ function BacktestPage() {
 }
 
 // ============================================================================
+// TeamPage Component
+// ============================================================================
+
+function TeamPage() {
+  const [teams, setTeams] = useState<Array<{ name: string; conference: string }>>([])
+  const [selectedTeam, setSelectedTeam] = useState('')
+  const [query, setQuery] = useState('')
+  const [showDropdown, setShowDropdown] = useState(false)
+  const [games, setGames] = useState<Game[]>([])
+  const [loading, setLoading] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const dropdownRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    axios.get(`${API_BASE}/api/teams`, { params: { scope: 'all' } }).then(r => {
+      const sorted = (r.data as Array<{ name: string; conference: string }>)
+        .sort((a, b) => a.name.localeCompare(b.name))
+      setTeams(sorted)
+    }).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (!selectedTeam) { setGames([]); return }
+    setLoading(true)
+    axios.get(`${API_BASE}/api/teams/${encodeURIComponent(selectedTeam)}/games`)
+      .then(r => { setGames(r.data.games || []); setLoading(false) })
+      .catch(() => { setGames([]); setLoading(false) })
+  }, [selectedTeam])
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) setShowDropdown(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  const filtered = query
+    ? teams.filter(t => t.name.toLowerCase().includes(query.toLowerCase()) || t.conference.toLowerCase().includes(query.toLowerCase()))
+    : teams
+
+  const pickTeam = (name: string) => {
+    setSelectedTeam(name)
+    setQuery(name)
+    setShowDropdown(false)
+  }
+
+  return (
+    <div>
+      <div className="team-search-wrapper" ref={dropdownRef} style={{ marginBottom: '1rem' }}>
+        <input
+          ref={inputRef}
+          className="team-search-input"
+          type="text"
+          placeholder="Search for a team..."
+          value={query}
+          onChange={e => { setQuery(e.target.value); setShowDropdown(true) }}
+          onFocus={() => setShowDropdown(true)}
+        />
+        {showDropdown && filtered.length > 0 && (
+          <div className="team-search-dropdown">
+            {filtered.map(t => (
+              <button
+                key={t.name}
+                className={`team-search-option ${t.name === selectedTeam ? 'active' : ''}`}
+                onClick={() => pickTeam(t.name)}
+              >
+                {t.name} <span className="team-conf">({t.conference})</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="loading">Loading games...</div>
+      ) : !selectedTeam ? (
+        <div className="no-games">Select a team to view their game log.</div>
+      ) : games.length === 0 ? (
+        <div className="no-games">No games found for {selectedTeam}.</div>
+      ) : (
+        <div className="games-grid">
+          {games.map(game => (
+            <GameCard key={game.game_id} game={game} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ============================================================================
 // App Component
 // ============================================================================
 
 function App() {
-  const [view, setView] = useState<View>('today')
+  const [view, setView] = useState<View>('scores')
   const [updatedAt, setUpdatedAt] = useState<string | null>(null)
 
   useEffect(() => {
@@ -1532,10 +1756,16 @@ function App() {
       <div className="app-header">
         <h1>NCAAB</h1>
         <button
-          className={`nav-btn ${view === 'today' ? 'active' : ''}`}
-          onClick={() => setView('today')}
+          className={`nav-btn ${view === 'scores' ? 'active' : ''}`}
+          onClick={() => setView('scores')}
         >
-          Today
+          All Scores
+        </button>
+        <button
+          className={`nav-btn ${view === 'team' ? 'active' : ''}`}
+          onClick={() => setView('team')}
+        >
+          Team
         </button>
         <button
           className={`nav-btn ${view === 'backtest' ? 'active' : ''}`}
@@ -1551,7 +1781,8 @@ function App() {
         )}
       </div>
       <div className="main-content">
-        {view === 'today' && <TodayDashboard />}
+        {view === 'scores' && <TodayDashboard />}
+        {view === 'team' && <TeamPage />}
         {view === 'backtest' && <BacktestPage />}
       </div>
     </div>

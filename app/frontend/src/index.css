@@ -128,15 +128,172 @@ html, body, #root {
   cursor: default;
 }
 
-.date-select {
+/* Calendar Picker */
+.cal-wrapper {
+  position: relative;
+}
+
+.cal-trigger {
   font-family: inherit;
   font-size: 13px;
-  padding: 4px 8px;
+  padding: 4px 10px;
   background: var(--bg-card);
   color: var(--text-bold);
   border: 1px solid var(--border-color);
   cursor: pointer;
-  min-width: 220px;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cal-trigger:hover {
+  border-color: var(--text-bold);
+}
+
+.cal-caret {
+  font-size: 9px;
+  color: var(--text-muted);
+}
+
+.cal-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 100;
+  margin-top: 4px;
+  background: var(--bg-main);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  padding: 12px;
+  width: 380px;
+}
+
+.cal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.cal-header button {
+  font-family: inherit;
+  font-size: 20px;
+  background: none;
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  cursor: pointer;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cal-header button:hover {
+  background: var(--bg-card);
+}
+
+.cal-month-label {
+  font-size: 16px;
+  font-weight: bold;
+  color: var(--text-bold);
+}
+
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.cal-dow {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 4px 0 6px;
+}
+
+.cal-cell {
+  font-family: inherit;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 0;
+  min-height: 46px;
+  border: 1px solid transparent;
+  background: none;
+  cursor: pointer;
+  color: var(--text-main);
+}
+
+.cal-cell:hover {
+  background: var(--bg-card);
+  border-color: var(--border-color);
+}
+
+.cal-cell.cal-outside {
+  color: var(--base1);
+}
+
+.cal-cell.cal-outside .cal-games {
+  opacity: 0.5;
+}
+
+.cal-cell.cal-today {
+  border-color: var(--blue);
+}
+
+.cal-cell.cal-selected {
+  background: var(--text-bold);
+  color: var(--bg-main);
+  border-color: var(--text-bold);
+}
+
+.cal-cell.cal-selected .cal-games {
+  color: var(--bg-main);
+  opacity: 0.85;
+}
+
+.cal-cell.cal-has-games .cal-day {
+  font-weight: bold;
+}
+
+.cal-day {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.cal-games {
+  font-size: 10px;
+  line-height: 1;
+  margin-top: 3px;
+  color: var(--blue);
+  font-weight: 600;
+}
+
+.cal-footer {
+  display: flex;
+  justify-content: center;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-color);
+}
+
+.cal-footer button {
+  font-family: inherit;
+  font-size: 13px;
+  padding: 5px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.cal-footer button:hover {
+  background: var(--text-bold);
+  color: var(--bg-main);
 }
 
 .game-status {
@@ -556,6 +713,72 @@ td.ot-line {
   color: var(--text-main);
   width: 100%;
   margin-bottom: 8px;
+}
+
+/* Team search typeahead */
+.team-search-wrapper {
+  position: relative;
+  max-width: 340px;
+}
+
+.team-search-input {
+  font-family: inherit;
+  font-size: 14px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-bold);
+  width: 100%;
+}
+
+.team-search-input:focus {
+  outline: none;
+  border-color: var(--text-bold);
+}
+
+.team-search-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--bg-main);
+  border: 1px solid var(--border-color);
+  border-top: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.team-search-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 6px 10px;
+  border: none;
+  background: none;
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.team-search-option:hover {
+  background: var(--bg-card);
+}
+
+.team-search-option.active {
+  background: var(--text-bold);
+  color: var(--bg-main);
+}
+
+.team-conf {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.team-search-option.active .team-conf {
+  color: var(--base1);
 }
 
 /* Section header */

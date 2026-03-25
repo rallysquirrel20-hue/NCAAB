@@ -14,10 +14,10 @@ MAX_RETRIES = 3
 RETRY_BACKOFF = 2.0
 
 # ---------------------------------------------------------------------------
-# The 68 confirmed tournament teams
+# The 68 confirmed tournament teams (subset of all D1 — used for odds, CSV)
 # ---------------------------------------------------------------------------
 
-TEAMS = [
+TOURNAMENT_TEAMS = [
     # East (16)
     "Duke", "UConn", "Michigan State", "Kansas", "St. John's",
     "Louisville", "UCLA", "Ohio State", "TCU", "UCF",
@@ -40,8 +40,10 @@ TEAMS = [
     "Long Island University", "NC State",
 ]
 
+TEAMS = TOURNAMENT_TEAMS  # backward-compat alias
+
 # ---------------------------------------------------------------------------
-# Conference map: canonical team name -> 2025-26 conference
+# Conference map: canonical team name -> 2025-26 conference (tournament teams)
 # ---------------------------------------------------------------------------
 
 CONFERENCE_MAP: dict[str, str] = {

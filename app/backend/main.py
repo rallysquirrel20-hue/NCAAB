@@ -43,6 +43,32 @@ GAME_LOGS_FILE = NCAAB_DIR / "ncaab_game_logs.parquet"
 ODDS_HISTORY_FILE = NCAAB_DIR / "ncaab_odds_history.parquet"
 TODAY_FILE = NCAAB_DIR / "ncaab_today.json"
 
+# D1 conference + team ID caches (built by daily builder)
+D1_CONF_MAP: dict[str, str] = {}  # espn_id -> conference
+D1_TEAM_IDS: dict[str, str] = {}  # name -> espn_id
+_d1_conf_file = NCAAB_DIR / "d1_conferences.json"
+_d1_ids_file = NCAAB_DIR / "d1_team_ids.json"
+if _d1_conf_file.exists():
+    try:
+        _cdata = json.loads(_d1_conf_file.read_text())
+        D1_CONF_MAP = _cdata.get("conferences", {})
+    except Exception:
+        pass
+if _d1_ids_file.exists():
+    try:
+        D1_TEAM_IDS = json.loads(_d1_ids_file.read_text())
+    except Exception:
+        pass
+
+
+def _get_conference(team_name: str) -> str:
+    """Get conference for any team (tournament or D1)."""
+    conf = CONFERENCE_MAP.get(team_name, "")
+    if not conf:
+        tid = D1_TEAM_IDS.get(team_name, "")
+        conf = D1_CONF_MAP.get(tid, "")
+    return conf
+
 # ---------------------------------------------------------------------------
 # Data cache with mtime-based refresh
 # ---------------------------------------------------------------------------
@@ -723,7 +749,7 @@ _rankings_cache: dict[str, dict] = {}
 
 
 def _compute_rankings(date: str) -> dict[str, dict[str, int]]:
-    """Compute per-stat rank (1=best) for all tracked teams as of a date.
+    """Compute per-stat rank (1=best) for all D1 teams as of a date.
 
     Returns {team_name: {stat: rank}}.
     """
@@ -734,7 +760,7 @@ def _compute_rankings(date: str) -> dict[str, dict[str, int]]:
     if df.empty:
         return {}
 
-    tracked = df[(df["is_tracked"] == True) & (df["date"] <= date)].copy()
+    tracked = df[df["date"] <= date].copy()
     if tracked.empty:
         return {}
 
@@ -805,7 +831,7 @@ def _build_side(r, rankings: dict[str, dict[str, int]] | None = None):
         "abbreviation": "",
         "id": str(r.get("event_id", "")),
         "score": _safe_int(r.get("team_score")),
-        "is_tracked": True,
+        "is_tracked": bool(r.get("is_tracked", False)),
         "stats": stats,
         "ranks": ranks,
     }
@@ -845,9 +871,9 @@ def get_games_by_date(date: str):
             continue
         seen_events.add(eid)
 
-        # Find opponent row if they're also tracked
-        opp_rows = day_df[
-            (day_df["event_id"] == eid) & (day_df["team"] != row["team"])
+        # Find opponent row (any D1 team, not just tracked)
+        opp_rows = df[
+            (df["date"] == date) & (df["event_id"] == eid) & (df["team"] != row["team"])
         ]
         opp_row = opp_rows.iloc[0] if not opp_rows.empty else None
 
@@ -914,6 +940,87 @@ def get_games_by_date(date: str):
         games.append(game)
 
     return {"date": date, "games": games, "game_count": len(games)}
+
+
+@app.get("/api/teams/{team_name}/games")
+def get_team_game_cards(team_name: str):
+    """Return game cards for a single team across all dates (newest first)."""
+    df = _get_game_logs()
+    if df.empty:
+        raise HTTPException(404, "No game data")
+
+    team_rows = df[df["team"] == team_name].copy()
+    if team_rows.empty:
+        raise HTTPException(404, f"Team '{team_name}' not found")
+
+    team_rows = team_rows.sort_values("date", ascending=False)
+    games = []
+
+    for _, row in team_rows.iterrows():
+        eid = row.get("event_id", "")
+        date = row["date"]
+        ha = row.get("home_away", "home")
+        is_neutral = bool(row.get("neutral_site", False))
+
+        # Find opponent row (any D1 team)
+        opp_rows = df[(df["event_id"] == eid) & (df["team"] != team_name)]
+        opp_row = opp_rows.iloc[0] if not opp_rows.empty else None
+
+        if ha == "home" or ha == "neutral":
+            home_side = _build_side(row)
+            away_side = _build_side(opp_row) if opp_row is not None else _build_untracked_side(row)
+        else:
+            away_side = _build_side(row)
+            home_side = _build_side(opp_row) if opp_row is not None else _build_untracked_side(row)
+
+        home_name = home_side["name"]
+        away_name = away_side["name"]
+        live_odds = _lookup_odds_for_game(home_name, away_name, date)
+
+        if live_odds:
+            odds_obj = {
+                "spread": live_odds["spread"],
+                "spread_price": live_odds["spread_price"],
+                "away_spread": live_odds["away_spread"],
+                "away_spread_price": live_odds["away_spread_price"],
+                "ml": live_odds["ml"],
+                "away_ml": live_odds["away_ml"],
+                "total": live_odds["total"],
+                "over_price": live_odds["over_price"],
+                "under_price": live_odds["under_price"],
+                "bookmaker": live_odds["bookmaker"],
+            }
+        else:
+            home_row = row if ha in ("home", "neutral") else (opp_row if opp_row is not None else row)
+            away_row = opp_row if ha in ("home", "neutral") else row
+            home_closing_spread = _safe_float(home_row.get("closing_fg_spread"))
+            away_closing_spread = -home_closing_spread if home_closing_spread is not None else None
+            odds_obj = {
+                "spread": home_closing_spread,
+                "spread_price": None,
+                "away_spread": away_closing_spread,
+                "away_spread_price": None,
+                "ml": _safe_float(home_row.get("closing_fg_ml")),
+                "away_ml": _safe_float(away_row.get("closing_fg_ml")) if away_row is not None else None,
+                "total": None,
+                "over_price": None,
+                "under_price": None,
+                "bookmaker": None,
+            }
+
+        games.append({
+            "game_id": eid,
+            "commence_time": f"{date}T00:00:00Z",
+            "date": date,
+            "status": "STATUS_FINAL",
+            "status_detail": "Final",
+            "neutral_site": is_neutral,
+            "home": home_side,
+            "away": away_side,
+            "odds": odds_obj,
+        })
+
+    return {"team": team_name, "games": games, "game_count": len(games)}
 
 
 @app.get("/api/dates")
@@ -1090,7 +1197,7 @@ def get_game_matchup(game_id: str):
 
     result = {"game_id": game_id}
     for side, name in [("home", home_canonical), ("away", away_canonical)]:
-        team_rows = df[(df["team"] == name) & (df["is_tracked"] == True)]
+        team_rows = df[df["team"] == name]
         if team_rows.empty:
             result[side] = {"name": name, "stats": {}, "ranks": {}}
             continue
@@ -1129,22 +1236,26 @@ def get_game_matchup(game_id: str):
 
 
 @app.get("/api/teams")
-def get_teams():
-    """Return all 68 teams with current stats."""
+def get_teams(scope: str = "tournament"):
+    """Return teams with current stats. scope=tournament (68) or all (D1)."""
     df = _get_game_logs()
     if df.empty:
         return []
 
-    tracked = df[df["is_tracked"] == True].copy()
-    tracked.sort_values("date", inplace=True)
+    df_sorted = df.sort_values("date")
+
+    if scope == "all":
+        team_names = sorted(df_sorted["team"].unique())
+    else:
+        team_names = TEAMS
 
     teams = []
-    for team_name in TEAMS:
-        team_rows = tracked[tracked["team"] == team_name]
+    for team_name in team_names:
+        team_rows = df_sorted[df_sorted["team"] == team_name]
         if team_rows.empty:
             teams.append({
                 "name": team_name,
-                "conference": CONFERENCE_MAP.get(team_name, ""),
+                "conference": _get_conference(team_name),
                 "games": 0,
             })
             continue
@@ -1166,9 +1277,11 @@ def get_teams():
                     if ats_m > 0:
                         ats_wins += 1
 
+        conf = _get_conference(team_name)
+
         info = {
             "name": team_name,
-            "conference": CONFERENCE_MAP.get(team_name, ""),
+            "conference": conf,
             "games": total_games,
             "record": f"{wins}-{losses}",
             "win_pct": round(wins / total_games, 3) if total_games else 0,
@@ -1198,9 +1311,7 @@ def get_team_detail(team_name: str):
     if df.empty:
         raise HTTPException(404, "No game data")
 
-    team_rows = df[
-        (df["team"] == team_name) & (df["is_tracked"] == True)
-    ].sort_values("date")
+    team_rows = df[df["team"] == team_name].sort_values("date")
 
     if team_rows.empty:
         raise HTTPException(404, f"Team '{team_name}' not found")
@@ -1224,7 +1335,7 @@ def get_team_detail(team_name: str):
 
     return {
         "team": team_name,
-        "conference": CONFERENCE_MAP.get(team_name, ""),
+        "conference": _get_conference(team_name),
         "games": records,
     }
 

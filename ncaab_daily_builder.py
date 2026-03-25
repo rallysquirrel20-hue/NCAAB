@@ -237,6 +237,116 @@ def get_team_ids() -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Full D1 Team + Conference Resolution
+# ---------------------------------------------------------------------------
+
+D1_TEAM_IDS_CACHE = SCRIPT_DIR / "d1_team_ids.json"
+D1_CONF_CACHE = SCRIPT_DIR / "d1_conferences.json"
+
+
+def get_all_d1_ids() -> dict[str, str]:
+    """Return {canonical_name: espn_id} for ALL D1 teams (~362)."""
+    if D1_TEAM_IDS_CACHE.exists():
+        with open(D1_TEAM_IDS_CACHE, "r") as f:
+            cached = json.load(f)
+        if len(cached) >= 350:
+            print(f"[{_now_str()}] Using cached D1 team IDs ({len(cached)} teams)")
+            return cached
+
+    print(f"[{_now_str()}] Fetching full D1 team directory ...")
+    team_map = fetch_espn_team_map()
+
+    # Deduplicate by ESPN ID → use displayName as canonical
+    seen_ids: set[str] = set()
+    d1_ids: dict[str, str] = {}
+    for _key, info in team_map.items():
+        tid = info["id"]
+        display = info["displayName"]
+        if tid not in seen_ids and display:
+            d1_ids[display] = tid
+            seen_ids.add(tid)
+
+    # Layer on hardcoded overrides and tournament aliases
+    for name, tid in HARDCODED_ESPN_IDS.items():
+        d1_ids[name] = tid
+
+    # Also register tournament canonical names (short names like "Duke")
+    # so they map to the same IDs as their displayName counterparts
+    tournament_ids = resolve_team_ids(team_map)
+    for name, tid in tournament_ids.items():
+        d1_ids[name] = tid
+
+    print(f"  Resolved {len(d1_ids)} D1 team IDs")
+    with open(D1_TEAM_IDS_CACHE, "w") as f:
+        json.dump(d1_ids, f, indent=2)
+    return d1_ids
+
+
+def fetch_d1_conference_map() -> dict[str, str]:
+    """Return {espn_id: conference_name} for all D1 teams.
+
+    Uses ESPN /groups endpoint (covers ~299 teams) + individual team
+    lookups for the remainder (~63 teams in missing conferences).
+    """
+    if D1_CONF_CACHE.exists():
+        with open(D1_CONF_CACHE, "r") as f:
+            cache = json.load(f)
+        cached_map = cache.get("conferences", {})
+        cached_date = cache.get("date", "")
+        today = datetime.now().strftime("%Y-%m-%d")
+        if cached_date == today and len(cached_map) >= 350:
+            print(f"[{_now_str()}] Using cached D1 conference map "
+                  f"({len(cached_map)} teams)")
+            return cached_map
+
+    print(f"[{_now_str()}] Fetching D1 conference map ...")
+    conf_map: dict[str, str] = {}
+
+    # Step 1: /groups endpoint (covers most conferences)
+    data = api_get(f"{ESPN_BASE}/groups", tag="groups")
+    if data:
+        groups = data.get("groups", data if isinstance(data, list) else [])
+        for top_group in groups:
+            if top_group.get("name") == "Non-NCAA Division I":
+                continue
+            for conf in top_group.get("children", []):
+                conf_name = conf.get("name", "")
+                # Shorten standard suffixes
+                conf_name = conf_name.replace(" Conference", "")
+                for t in conf.get("teams", []):
+                    conf_map[str(t["id"])] = conf_name
+
+    # Step 2: Fill in missing teams from individual /teams/{id} endpoints
+    all_d1_ids = get_all_d1_ids()
+    all_espn_ids = set(all_d1_ids.values())
+    missing_ids = all_espn_ids - set(conf_map.keys())
+
+    if missing_ids:
+        print(f"  Fetching conferences for {len(missing_ids)} remaining teams ...")
+        for i, tid in enumerate(sorted(missing_ids), 1):
+            data = api_get(f"{ESPN_BASE}/teams/{tid}", tag=f"team-{tid}")
+            if data:
+                team = data.get("team", {})
+                standing = team.get("standingSummary", "")
+                # Parse "8th in Summit" → "Summit"
+                if " in " in standing:
+                    conf_name = standing.split(" in ", 1)[1].strip()
+                    conf_map[tid] = conf_name
+            if i % 25 == 0:
+                print(f"    {i}/{len(missing_ids)} ...")
+
+    print(f"  Conference map: {len(conf_map)} teams across "
+          f"{len(set(conf_map.values()))} conferences")
+
+    with open(D1_CONF_CACHE, "w") as f:
+        json.dump({
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "conferences": conf_map,
+        }, f, indent=2)
+    return conf_map
+
+
+# ---------------------------------------------------------------------------
 # Parquet I/O
 # ---------------------------------------------------------------------------
 
@@ -422,8 +532,9 @@ def fetch_scoreboard(date: datetime) -> list[dict]:
 
 def parse_scoreboard(
     events: list[dict],
-    tracked_ids: set[str],
-    id_to_name: dict[str, str],
+    tournament_ids: set[str],
+    d1_id_to_name: dict[str, str],
+    d1_conf_by_id: dict[str, str],
     scoreboard_date: str = "",
 ) -> list[dict]:
     rows: list[dict] = []
@@ -471,14 +582,13 @@ def parse_scoreboard(
                                             team_info.get("displayName", "")),
                 "first_half": _parse_first_half(c.get("linescores", [])),
                 "ap_rank": _extract_ap_rank(c),
-                "is_tracked": cid in tracked_ids,
             })
 
+        # Create a row for BOTH teams in every game
         for i, team_c in enumerate(comp_data):
-            if not team_c["is_tracked"]:
-                continue
             opp_c = comp_data[1 - i]
-            canonical = id_to_name.get(team_c["id"], "")
+            canonical = d1_id_to_name.get(team_c["id"],
+                                          team_c["display_name"])
             if not canonical:
                 continue
 
@@ -487,12 +597,10 @@ def parse_scoreboard(
                         else ("L" if team_c["score"] < opp_c["score"]
                               else "T"))
 
-            opp_canonical = id_to_name.get(opp_c["id"])
-            conf_game = False
-            if opp_canonical:
-                tc = CONFERENCE_MAP.get(canonical)
-                oc = CONFERENCE_MAP.get(opp_canonical)
-                conf_game = bool(tc and tc == oc)
+            # Conference game detection using full D1 conference map
+            tc = d1_conf_by_id.get(team_c["id"])
+            oc = d1_conf_by_id.get(opp_c["id"])
+            conf_game = bool(tc and tc == oc)
 
             rows.append({
                 "team": canonical,
@@ -511,7 +619,7 @@ def parse_scoreboard(
                 "team_1h": team_c["first_half"],
                 "opp_1h": opp_c["first_half"],
                 "opp_ap_rank": opp_c["ap_rank"],
-                "is_tracked": True,
+                "is_tracked": team_c["id"] in tournament_ids,
             })
 
     return rows
@@ -631,17 +739,10 @@ def backfill_game_details(
 def backfill_boxscore_data(
     df: pd.DataFrame, team_ids: dict[str, str],
 ) -> pd.DataFrame:
-    """Backfill boxscore stats + AP rank for existing games missing them.
-    Only processes tracked rows — untracked mirror rows get boxscore data
-    from their tracked counterpart via create_mirror_rows."""
-    missing_mask = df["team_fgm"].isna() & (df["is_tracked"] == True)  # noqa: E712
+    """Backfill boxscore stats + AP rank for existing games missing them."""
+    missing_mask = df["team_fgm"].isna()
     if not missing_mask.any():
-        all_missing = df["team_fgm"].isna().sum()
-        if all_missing:
-            print(f"  [{_now_str()}] {all_missing} rows missing boxscore but "
-                  f"all are untracked — skipping.")
-        else:
-            print(f"  [{_now_str()}] All rows already have boxscore data.")
+        print(f"  [{_now_str()}] All rows already have boxscore data.")
         return df
 
     missing_events = df[missing_mask]["event_id"].unique()
@@ -1067,9 +1168,11 @@ def phase1_fetch_opponent_games(
 
 def phase1_fetch_games(
     df: pd.DataFrame,
-    team_ids: dict[str, str],
-    tracked_ids: set[str],
-    id_to_name: dict[str, str],
+    d1_team_ids: dict[str, str],
+    tournament_ids: set[str],
+    d1_id_to_name: dict[str, str],
+    d1_conf_by_id: dict[str, str],
+    force_start: datetime | None = None,
 ) -> tuple[pd.DataFrame, set[str]]:
     """Return (updated_df, set_of_new_date_strings)."""
     existing_keys: set[tuple[str, str]] = set()
@@ -1078,7 +1181,9 @@ def phase1_fetch_games(
 
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
-    if df.empty:
+    if force_start:
+        start_date = force_start
+    elif df.empty:
         start_date = SEASON_START
     else:
         start_date = datetime.strptime(df["date"].max(), "%Y-%m-%d")
@@ -1109,7 +1214,9 @@ def phase1_fetch_games(
         if not events:
             continue
 
-        day_games = parse_scoreboard(events, tracked_ids, id_to_name, date_str)
+        day_games = parse_scoreboard(
+            events, tournament_ids, d1_id_to_name, d1_conf_by_id, date_str,
+        )
         day_games = [
             g for g in day_games
             if (g["team"], g["event_id"]) not in existing_keys
@@ -1120,7 +1227,7 @@ def phase1_fetch_games(
         print(f"  [{_now_str()}] ({i}/{len(dates_to_fetch)}) "
               f"{date_str}: {len(day_games)} new rows")
 
-        backfill_game_details(day_games, team_ids)
+        backfill_game_details(day_games, d1_team_ids)
 
         all_new_rows.extend(day_games)
         new_dates.add(date_str)
@@ -2123,18 +2230,23 @@ def main():
                         help="Re-scan scoreboards to fill AP ranks for all games")
     parser.add_argument("--backfill-times", action="store_true",
                         help="Backfill commence_time_utc for all games")
-    parser.add_argument("--backfill-opponents", action="store_true",
-                        help="Fetch game logs for non-tournament opponents")
+    parser.add_argument("--rebuild-all", action="store_true",
+                        help="Re-scan all dates to capture all D1 teams")
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  NCAAB Daily Builder -- Season 2025-26")
+    print("  NCAAB Daily Builder -- Season 2025-26 (Full D1)")
     print("=" * 60)
     print()
 
-    team_ids = get_team_ids()
-    tracked_ids = set(team_ids.values())
-    id_to_name = {tid: name for name, tid in team_ids.items()}
+    # Full D1 team directory
+    d1_team_ids = get_all_d1_ids()
+    d1_id_to_name = {tid: name for name, tid in d1_team_ids.items()}
+    d1_conf_by_id = fetch_d1_conference_map()
+
+    # Tournament subset (for odds, CSV export, is_tracked flag)
+    tournament_team_ids = get_team_ids()
+    tournament_ids = set(tournament_team_ids.values())
 
     df = load_game_logs()
 
@@ -2142,11 +2254,19 @@ def main():
     if "is_tracked" not in df.columns:
         df["is_tracked"] = None
     if not df.empty:
-        # Rows with team name in TEAMS are tracked
         tracked_names = set(TEAMS)
         df.loc[df["is_tracked"].isna(), "is_tracked"] = (
             df.loc[df["is_tracked"].isna(), "team"].isin(tracked_names)
         )
+
+    # --rebuild-all: drop old non-tournament rows (partial mirror/opponent data)
+    # and re-scan from season start to capture all D1 teams
+    if args.rebuild_all:
+        if not df.empty:
+            old_len = len(df)
+            df = df[df["is_tracked"] == True].copy()  # noqa: E712
+            print(f"[{_now_str()}] --rebuild-all: kept {len(df)} tournament rows, "
+                  f"dropped {old_len - len(df)} non-tournament rows")
 
     # Show existing data summary
     existing_spreads = df["closing_fg_spread"].notna().sum() if not df.empty else 0
@@ -2156,6 +2276,8 @@ def main():
 
     # Show what we're about to do
     flags = []
+    if args.rebuild_all:
+        flags.append("rebuild-all (full D1 re-scan)")
     if args.backfill_odds:
         if args.backfill_odds == "all":
             flags.append("backfill-odds (ALL missing dates)")
@@ -2167,18 +2289,20 @@ def main():
         flags.append("backfill-ranks")
     if args.backfill_times:
         flags.append("backfill-times")
-    if args.backfill_opponents:
-        flags.append("backfill-opponents")
     if flags:
         print(f"[{_now_str()}] Flags: {', '.join(flags)}")
     else:
         print(f"[{_now_str()}] Mode: daily incremental (new dates only)")
     print()
 
-    # Phase 1: new games
-    df, new_dates = phase1_fetch_games(df, team_ids, tracked_ids, id_to_name)
+    # Phase 1: new games (all D1 teams)
+    force_start = SEASON_START if args.rebuild_all else None
+    df, new_dates = phase1_fetch_games(
+        df, d1_team_ids, tournament_ids, d1_id_to_name, d1_conf_by_id,
+        force_start=force_start,
+    )
 
-    # Phase 2: odds
+    # Phase 2: odds (tournament teams only)
     if args.backfill_odds:
         date_filter = None if args.backfill_odds == "all" else args.backfill_odds
         if date_filter:
@@ -2192,31 +2316,23 @@ def main():
     # Backfill boxscore stats for existing games
     if args.backfill_boxscore:
         print(f"[{_now_str()}] Backfilling boxscore data ...")
-        df = backfill_boxscore_data(df, team_ids)
+        df = backfill_boxscore_data(df, d1_team_ids)
 
     # Backfill AP ranks from scoreboards
     if args.backfill_ranks:
         print(f"[{_now_str()}] Backfilling AP ranks ...")
-        df = backfill_ap_ranks(df, tracked_ids, id_to_name)
+        df = backfill_ap_ranks(df, tournament_ids, d1_id_to_name)
 
     # Backfill commence times
     if args.backfill_times:
         print(f"[{_now_str()}] Backfilling commence times ...")
         df = backfill_commence_times(df)
 
-    # Create mirror rows for non-tournament opponents
-    df = create_mirror_rows(df, tracked_ids, team_ids)
-
-    # Backfill opponent game logs
-    if args.backfill_opponents:
-        print(f"[{_now_str()}] Backfilling opponent game logs ...")
-        df = phase1_fetch_opponent_games(df, team_ids, tracked_ids)
-
     # Save after API phases (in case Phase 3/4 crash, data is safe)
     save_game_logs(df)
 
     # Phase 3: PIT stats (always recomputed, no API)
-    df = phase3_compute_pit(df, team_ids)
+    df = phase3_compute_pit(df, d1_team_ids)
 
     # Phase 4: export CSV
     phase4_export_csv(df)
