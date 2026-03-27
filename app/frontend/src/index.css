@@ -468,7 +468,7 @@ td.ot-line {
 }
 
 .matchup-table tbody tr:hover td {
-  background: var(--base1) !important;
+  background: rgba(88, 110, 117, 0.08) !important;
 }
 
 .mu-rank {
@@ -644,7 +644,7 @@ td.ot-line {
 }
 
 .strategy-table tr:hover td {
-  background: var(--bg-card);
+  background: rgba(88, 110, 117, 0.08);
 }
 
 .profitable {
@@ -898,4 +898,283 @@ td.ot-line {
 .collapse-btn:hover {
   color: var(--red);
   border-color: var(--red);
+}
+
+/* ============================================================================
+   Trends Page
+   ============================================================================ */
+
+.trends-page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.trends-chart-section {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.trends-chart-header {
+  margin-bottom: 12px;
+}
+
+.trends-chart-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.trends-bet-toggle {
+  display: flex;
+  gap: 4px;
+}
+
+.trends-chart-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-bold);
+}
+
+.trends-chart-subtitle {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.trends-chart {
+  width: 100%;
+  height: 320px;
+  margin-bottom: 12px;
+}
+
+.trends-timeframe-bar {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.trends-filter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.trends-filter-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.trends-filter-btn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 4px 10px;
+  min-width: 56px;
+  text-align: center;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: var(--bg-main);
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.1s;
+}
+
+.trends-filter-btn:hover {
+  color: var(--text-bold);
+  border-color: var(--text-bold);
+}
+
+.trends-filter-btn.active {
+  background: var(--text-bold);
+  color: var(--bg-main);
+  border-color: var(--text-bold);
+}
+
+.trends-filter-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border-color);
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+
+.trends-tier-group {
+  display: contents;
+}
+
+.trends-filter-btn.tier-btn {
+  font-weight: 700;
+  border-width: 2px;
+}
+
+.trends-tables {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 900px) {
+  .trends-tables {
+    grid-template-columns: 1fr;
+  }
+}
+
+.trends-section {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 12px;
+}
+
+.trends-venue-group {
+  margin-bottom: 14px;
+}
+
+.trends-venue-group:last-child {
+  margin-bottom: 0;
+}
+
+.trends-venue-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+  padding-left: 4px;
+}
+
+.trends-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+.trends-table thead th {
+  text-align: right;
+  padding: 3px 8px;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.trends-table thead th:first-child {
+  text-align: left;
+}
+
+.trends-table tbody td {
+  padding: 4px 8px;
+  text-align: right;
+  border-bottom: 1px solid #eee8d5;
+}
+
+.trends-table tbody td:first-child {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-bold);
+}
+
+.trends-row {
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.trends-row:hover {
+  background: rgba(88, 110, 117, 0.08);
+}
+
+.trends-row.selected {
+  background: rgba(50, 50, 255, 0.1);
+  border-left: 3px solid rgb(50, 50, 255);
+}
+
+.trends-row.selected td:first-child {
+  padding-left: 5px;
+}
+
+.trends-row.empty {
+  opacity: 0.4;
+}
+
+.trends-record {
+  font-weight: 600;
+}
+
+.positive {
+  color: rgb(50, 50, 255);
+}
+
+.negative {
+  color: rgb(255, 50, 150);
+}
+
+/* Trends Bets Table */
+
+.trends-bets-section {
+  margin-top: 20px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 12px;
+}
+
+.trends-bets-scroll {
+  max-height: 500px;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+
+.trends-bets-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.trends-bets-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.trends-bets-table thead th {
+  text-align: left;
+  padding: 5px 8px;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-card);
+}
+
+.trends-bets-table tbody td {
+  padding: 4px 8px;
+  border-bottom: 1px solid #eee8d5;
+  white-space: nowrap;
+}
+
+.trends-bets-table tbody tr:hover {
+  background: rgba(88, 110, 117, 0.06);
+}
+
+.trends-bets-table .bet-team {
+  font-weight: 600;
+  color: var(--text-bold);
+}
+
+.trends-bets-table .bet-venue {
+  text-transform: capitalize;
+  color: var(--text-muted);
+  font-size: 10px;
 }

@@ -107,7 +107,7 @@ interface ColumnGroups {
   [group: string]: ColEntry[]
 }
 
-type View = 'scores' | 'team' | 'backtest'
+type View = 'scores' | 'team' | 'backtest' | 'trends'
 
 // ============================================================================
 // Helpers
@@ -409,6 +409,7 @@ function GameBacktest({ game }: { game: Game }) {
   const [games, setGames] = useState<BacktestGame[]>([])
   const [pnl, setPnl] = useState<PnlPoint[]>([])
   const [loading, setLoading] = useState(false)
+  const [betType, setBetType] = useState<BetType>('ats')
 
   useEffect(() => {
     axios.get(`${API_BASE}/api/columns`).then(r => setColumns(r.data)).catch(() => {})
@@ -441,6 +442,7 @@ function GameBacktest({ game }: { game: Game }) {
       team: team || null,
       filters: validFilters,
       name: team ? `${team} — custom` : 'Both teams — custom',
+      bet_type: betType,
     })
       .then(r => {
         setResult(r.data.result)
@@ -567,8 +569,10 @@ function GameBacktest({ game }: { game: Game }) {
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: 4, marginTop: 6 }}>
+        <div style={{ display: 'flex', gap: 4, marginTop: 6, alignItems: 'center' }}>
           <button className="btn btn-sm" onClick={addFilter}>+ Filter</button>
+          <button className={`trends-filter-btn ${betType === 'ats' ? 'active' : ''}`} onClick={() => setBetType('ats')}>ATS</button>
+          <button className={`trends-filter-btn ${betType === 'ml' ? 'active' : ''}`} onClick={() => setBetType('ml')}>ML</button>
           <button className="btn btn-sm primary" onClick={runBacktest} disabled={loading}>
             {loading ? 'Running...' : 'Run Backtest'}
           </button>
@@ -1325,6 +1329,7 @@ function BacktestPage() {
   const [activeTab, setActiveTab] = useState<'custom' | 'strategies' | 'scan'>('custom')
   const [sortCol, setSortCol] = useState<string>('win_pct')
   const [sortAsc, setSortAsc] = useState(false)
+  const [betType, setBetType] = useState<BetType>('ats')
 
   useEffect(() => {
     axios.get(`${API_BASE}/api/columns`).then(r => setColumns(r.data)).catch(() => {})
@@ -1348,6 +1353,7 @@ function BacktestPage() {
       team: team || null,
       filters: validFilters,
       name: team ? `Custom: ${team}` : 'Custom backtest',
+      bet_type: betType,
     })
       .then(r => {
         setResult(r.data.result)
@@ -1515,7 +1521,12 @@ function BacktestPage() {
           <button className="btn btn-sm" onClick={addFilter}>+ Filter</button>
         </div>
 
-        <div style={{ display: 'flex', gap: 4, marginTop: 12, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 4, marginTop: 10 }}>
+          <span style={{ fontSize: 10, color: '#657b83', alignSelf: 'center', marginRight: 2 }}>Bet Type:</span>
+          <button className={`trends-filter-btn ${betType === 'ats' ? 'active' : ''}`} onClick={() => setBetType('ats')}>ATS</button>
+          <button className={`trends-filter-btn ${betType === 'ml' ? 'active' : ''}`} onClick={() => setBetType('ml')}>ML</button>
+        </div>
+        <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' }}>
           <button className="btn primary" onClick={runBacktest} disabled={loading}>
             {loading ? 'Running...' : 'Run Backtest'}
           </button>
@@ -1773,6 +1784,12 @@ function App() {
         >
           Backtest
         </button>
+        <button
+          className={`nav-btn ${view === 'trends' ? 'active' : ''}`}
+          onClick={() => setView('trends')}
+        >
+          Trends
+        </button>
         <div className="header-spacer" />
         {updatedAt && (
           <span className="updated-at">
@@ -1784,7 +1801,475 @@ function App() {
         {view === 'scores' && <TodayDashboard />}
         {view === 'team' && <TeamPage />}
         {view === 'backtest' && <BacktestPage />}
+        {view === 'trends' && <TrendsPage />}
       </div>
+    </div>
+  )
+}
+
+// ============================================================================
+// TrendsPage Component
+// ============================================================================
+
+interface TrendTimeframe {
+  wins: number
+  losses: number
+  n: number
+  win_pct: number
+  roi: number
+  profit: number
+  pnl: { date: string; pnl: number }[]
+}
+
+interface TrendStrategy {
+  id: string
+  side: string
+  venue: string
+  bucket: string
+  label: string
+  timeframes: { [key: string]: TrendTimeframe }
+}
+
+interface TrendGame {
+  date: string
+  team: string
+  opponent: string
+  spread: number
+  spread_price: number
+  team_score: number
+  opp_score: number
+  margin: number
+  ats_margin: number
+  covered: boolean
+  stake: number
+  profit: number
+  side: string
+  venue: string
+  bucket: string
+  phase: string
+  conference: string
+  ml_price: number | null
+  ml_covered: boolean
+  ml_stake: number | null
+  ml_profit: number | null
+}
+
+type BetType = 'ats' | 'ml'
+
+interface TrendsData {
+  strategies: TrendStrategy[]
+  buckets: string[]
+  games: TrendGame[]
+  conferences: string[]
+  power5: string[]
+  conf_tiers: { [tier: string]: string[] }
+}
+
+const TIMEFRAME_LABELS: { [key: string]: string } = {
+  all: 'All Games',
+  regular: 'Regular Season',
+  conference_regular: 'Conf. Regular',
+  non_conference_regular: 'Non-Conf. Regular',
+  conference_tournament: 'Conf. Tournament',
+  ncaa_tournament: 'NCAA Tournament',
+}
+
+const TIMEFRAME_KEYS = Object.keys(TIMEFRAME_LABELS)
+
+function TrendsChart({ data }: { data: { date: string; pnl: number }[] }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const chartRef = useRef<IChartApi | null>(null)
+
+  useEffect(() => {
+    if (!containerRef.current || !data || data.length === 0) return
+
+    try {
+      if (chartRef.current) {
+        chartRef.current.remove()
+        chartRef.current = null
+      }
+
+      const container = containerRef.current
+      container.innerHTML = ''
+
+      const chart = createChart(container, {
+        width: container.clientWidth,
+        height: 320,
+        layout: {
+          background: { color: '#fdf6e3' },
+          textColor: '#586e75',
+          fontFamily: "'Fira Code', monospace",
+          fontSize: 10,
+        },
+        grid: {
+          vertLines: { color: '#eee8d5' },
+          horzLines: { color: '#eee8d5' },
+        },
+        rightPriceScale: {
+          borderColor: '#93a1a1',
+        },
+        crosshair: {
+          horzLine: { labelBackgroundColor: '#586e75' },
+          vertLine: { labelBackgroundColor: '#586e75' },
+        },
+      })
+      chartRef.current = chart
+
+      // Determine line color from final P&L
+      const finalPnl = data[data.length - 1]?.pnl ?? 0
+      const lineColor = finalPnl >= 0 ? 'rgb(50, 50, 255)' : 'rgb(255, 50, 150)'
+
+      const series = chart.addSeries(LineSeries, {
+        color: lineColor,
+        lineWidth: 2,
+      })
+
+      // Zero line
+      const zeroSeries = chart.addSeries(LineSeries, {
+        color: '#93a1a1',
+        lineWidth: 1,
+        lineStyle: 2,
+        crosshairMarkerVisible: false,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      })
+
+      const dateMap = new Map<string, number>()
+      for (const p of data) {
+        dateMap.set(p.date, p.pnl)
+      }
+      const chartData = Array.from(dateMap.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([date, pnl]) => ({ time: date as any, value: pnl }))
+
+      series.setData(chartData)
+
+      if (chartData.length >= 2) {
+        zeroSeries.setData([
+          { time: chartData[0].time, value: 0 },
+          { time: chartData[chartData.length - 1].time, value: 0 },
+        ])
+      }
+
+      chart.timeScale().fitContent()
+
+      const handleResize = () => {
+        if (containerRef.current && chartRef.current) {
+          chartRef.current.applyOptions({ width: containerRef.current.clientWidth })
+        }
+      }
+      window.addEventListener('resize', handleResize)
+      return () => {
+        window.removeEventListener('resize', handleResize)
+        if (chartRef.current) {
+          chartRef.current.remove()
+          chartRef.current = null
+        }
+      }
+    } catch (e) {
+      console.warn('TrendsChart render error:', e)
+    }
+  }, [data])
+
+  return <div ref={containerRef} className="trends-chart" />
+}
+
+function TrendsPage() {
+  const [data, setData] = useState<TrendsData | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [selectedId, setSelectedId] = useState<string>('favorite_all_all')
+  const [timeframe, setTimeframe] = useState<string>('all')
+  const [confFilter, setConfFilter] = useState<string>('all')
+  const [betType, setBetType] = useState<BetType>('ats')
+
+  useEffect(() => {
+    setLoading(true)
+    axios.get(`${API_BASE}/api/trends`)
+      .then(r => {
+        setData(r.data)
+        setLoading(false)
+      })
+      .catch(() => setLoading(false))
+  }, [])
+
+  if (loading) return <div className="loading">Loading trends...</div>
+  if (!data || !data.games?.length) return <div className="no-games">No trend data available</div>
+
+  const PHASE_MAP: { [tf: string]: string[] | null } = {
+    all: null,
+    regular: ['conference_regular', 'non_conference_regular'],
+    conference_regular: ['conference_regular'],
+    non_conference_regular: ['non_conference_regular'],
+    conference_tournament: ['conference_tournament'],
+    ncaa_tournament: ['ncaa_tournament'],
+  }
+
+  const tiers = data.conf_tiers ?? {}
+  const tierKeys = ['power5', 'high_major', 'mid_major', 'low_major'] as const
+  const tierLabels: { [k: string]: string } = {
+    power5: 'Power 5', high_major: 'High Major', mid_major: 'Mid Major', low_major: 'Low Major',
+  }
+  const allTierConfs = new Set(tierKeys.flatMap(t => tiers[t] ?? []))
+
+  // Apply conference + timeframe filter to all games
+  const baseGames = data.games.filter(g => {
+    // Conference filter
+    if (confFilter === 'power5' || confFilter === 'high_major' || confFilter === 'mid_major' || confFilter === 'low_major') {
+      if (!(tiers[confFilter] ?? []).includes(g.conference)) return false
+    } else if (confFilter !== 'all') {
+      if (g.conference !== confFilter) return false
+    }
+    // Timeframe filter
+    const phases = PHASE_MAP[timeframe]
+    if (phases && !phases.includes(g.phase)) return false
+    return true
+  })
+
+  // Compute stats from a set of games
+  const computeStats = (games: TrendGame[]): TrendTimeframe => {
+    // For ML, filter to games that have ML data
+    const effective = betType === 'ml'
+      ? games.filter(g => g.ml_price != null && g.ml_stake != null)
+      : games
+    if (effective.length === 0) {
+      return { wins: 0, losses: 0, n: 0, win_pct: 0, roi: 0, profit: 0, pnl: [] }
+    }
+    const wins = effective.filter(g =>
+      betType === 'ml' ? g.ml_covered : g.covered
+    ).length
+    const n = effective.length
+    const losses = n - wins
+    const totalProfit = effective.reduce((s, g) =>
+      s + (betType === 'ml' ? (g.ml_profit ?? 0) : g.profit), 0)
+    const totalRisked = effective.reduce((s, g) =>
+      s + (betType === 'ml' ? (g.ml_stake ?? 0) : g.stake), 0)
+    const roi = totalRisked > 0 ? (totalProfit / totalRisked) * 100 : 0
+
+    const sorted = [...effective].sort((a, b) => a.date.localeCompare(b.date))
+    let cum = 0
+    const pnl = sorted.map(g => {
+      cum += betType === 'ml' ? (g.ml_profit ?? 0) : g.profit
+      return { date: g.date, pnl: Math.round(cum * 100) / 100 }
+    })
+
+    return {
+      wins, losses, n,
+      win_pct: Math.round((wins / n) * 10000) / 10000,
+      roi: Math.round(roi * 100) / 100,
+      profit: Math.round(totalProfit * 100) / 100,
+      pnl,
+    }
+  }
+
+  // Compute stats for a strategy key (side/venue/bucket) from baseGames
+  const getStats = (side: string, venue: string, bucket: string): TrendTimeframe => {
+    let games = baseGames.filter(g => g.side === side)
+    if (venue !== 'all') games = games.filter(g => g.venue === venue)
+    if (bucket !== 'all') games = games.filter(g => g.bucket === bucket)
+    return computeStats(games)
+  }
+
+  const selected = data.strategies.find(s => s.id === selectedId)
+  const selectedStats = selected ? getStats(selected.side, selected.venue, selected.bucket) : null
+  const chartData = selectedStats?.pnl ?? []
+
+  const venues = ['all', 'home', 'away', 'neutral']
+  const buckets = ['all', ...data.buckets]
+
+  const venueLabels: { [k: string]: string } = {
+    all: 'All', home: 'Home', away: 'Away', neutral: 'Neutral',
+  }
+
+  const renderRecord = (tf: TrendTimeframe) => {
+    if (tf.n === 0) return <span className="text-muted">--</span>
+    return <>{tf.wins}-{tf.losses}</>
+  }
+  const renderRoi = (tf: TrendTimeframe) => {
+    if (tf.n === 0) return <span className="text-muted">--</span>
+    const cls = tf.roi > 0 ? 'positive' : tf.roi < 0 ? 'negative' : ''
+    return <span className={cls}>{tf.roi > 0 ? '+' : ''}{tf.roi.toFixed(1)}%</span>
+  }
+  const renderProfit = (tf: TrendTimeframe) => {
+    if (tf.n === 0) return <span className="text-muted">--</span>
+    const cls = tf.profit > 0 ? 'positive' : tf.profit < 0 ? 'negative' : ''
+    return <span className={cls}>{tf.profit > 0 ? '+' : ''}{tf.profit.toFixed(2)}u</span>
+  }
+
+  const renderSideSection = (side: 'favorite' | 'underdog') => {
+    const btLabel = betType === 'ml' ? 'ML' : 'ATS'
+    const sideLabel = side === 'favorite' ? `FAVORITES ${btLabel}` : `UNDERDOGS ${btLabel}`
+    return (
+      <div key={side} className="trends-section">
+        <div className="section-header">{sideLabel}</div>
+        {venues.map(venue => (
+          <div key={venue} className="trends-venue-group">
+            <div className="trends-venue-label">{venueLabels[venue]} Teams</div>
+            <table className="trends-table">
+              <thead>
+                <tr>
+                  <th>Spread</th>
+                  <th>Record</th>
+                  <th>ROI</th>
+                  <th>P&L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {buckets.map(bucket => {
+                  const id = `${side}_${venue}_${bucket}`
+                  const tf = getStats(side, venue, bucket)
+                  const isSelected = id === selectedId
+                  return (
+                    <tr
+                      key={id}
+                      className={`trends-row ${isSelected ? 'selected' : ''} ${tf.n === 0 ? 'empty' : ''}`}
+                      onClick={() => setSelectedId(id)}
+                    >
+                      <td className="trends-bucket">{bucket === 'all' ? 'All' : bucket}</td>
+                      <td className="trends-record">{renderRecord(tf)}</td>
+                      <td className="trends-roi">{renderRoi(tf)}</td>
+                      <td className="trends-profit">{renderProfit(tf)}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  const selectedLabel = selected?.label ?? 'Favorites / All / All Spreads'
+  const confLabel = confFilter === 'all' ? 'All Conferences'
+    : tierLabels[confFilter] ?? confFilter
+
+  // Filtered games for the bets table
+  const filteredGames = baseGames
+    .filter(g => {
+      if (!selected) return false
+      if (g.side !== selected.side) return false
+      if (selected.venue !== 'all' && g.venue !== selected.venue) return false
+      if (selected.bucket !== 'all' && g.bucket !== selected.bucket) return false
+      return true
+    })
+    .sort((a, b) => b.date.localeCompare(a.date))
+
+  return (
+    <div className="trends-page">
+      <div className="trends-chart-section">
+        <div className="trends-chart-header">
+          <div className="trends-chart-title-row">
+            <div className="trends-chart-title">{selectedLabel}</div>
+            <div className="trends-bet-toggle">
+              <button
+                className={`trends-filter-btn ${betType === 'ats' ? 'active' : ''}`}
+                onClick={() => setBetType('ats')}
+              >ATS</button>
+              <button
+                className={`trends-filter-btn ${betType === 'ml' ? 'active' : ''}`}
+                onClick={() => setBetType('ml')}
+              >ML</button>
+            </div>
+          </div>
+          <div className="trends-chart-subtitle">
+            {confLabel} &mdash; {TIMEFRAME_LABELS[timeframe]}
+            {selectedStats && selectedStats.n > 0 && (
+              <> &mdash; {selectedStats.wins}-{selectedStats.losses} ({(selectedStats.win_pct * 100).toFixed(1)}%) &mdash; ROI: {selectedStats.roi > 0 ? '+' : ''}{selectedStats.roi.toFixed(1)}% &mdash; P&L: {selectedStats.profit > 0 ? '+' : ''}{selectedStats.profit.toFixed(2)}u</>
+            )}
+          </div>
+        </div>
+        <TrendsChart data={chartData} />
+        <div className="trends-filter-bar">
+          <div className="trends-filter-row">
+            <button
+              className={`trends-filter-btn ${confFilter === 'all' ? 'active' : ''}`}
+              onClick={() => setConfFilter('all')}
+            >All Conferences</button>
+          </div>
+          {tierKeys.map(tier => (
+            <div key={tier} className="trends-filter-row">
+              <button
+                className={`trends-filter-btn tier-btn ${confFilter === tier ? 'active' : ''}`}
+                onClick={() => setConfFilter(tier)}
+              >{tierLabels[tier]}</button>
+              {(tiers[tier] ?? []).map(c => (
+                <button
+                  key={c}
+                  className={`trends-filter-btn ${confFilter === c ? 'active' : ''}`}
+                  onClick={() => setConfFilter(c)}
+                >{c}</button>
+              ))}
+            </div>
+          ))}
+          <div className="trends-filter-row">
+            {TIMEFRAME_KEYS.map(tf => (
+              <button
+                key={tf}
+                className={`trends-filter-btn ${timeframe === tf ? 'active' : ''}`}
+                onClick={() => setTimeframe(tf)}
+              >
+                {TIMEFRAME_LABELS[tf]}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="trends-tables">
+        {renderSideSection('favorite')}
+        {renderSideSection('underdog')}
+      </div>
+      {filteredGames.length > 0 && (
+        <div className="trends-bets-section">
+          <div className="section-header">
+            Bet History &mdash; {selectedLabel} &mdash; {confLabel} &mdash; {TIMEFRAME_LABELS[timeframe]} ({filteredGames.length} bets)
+          </div>
+          <div className="trends-bets-scroll">
+            <table className="trends-bets-table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Team</th>
+                  <th>Opponent</th>
+                  <th>Venue</th>
+                  <th>Spread</th>
+                  <th>Price</th>
+                  <th>Score</th>
+                  <th>ATS Margin</th>
+                  <th>Result</th>
+                  <th>P&L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredGames.map((g, i) => {
+                  const won = betType === 'ml' ? g.ml_covered : g.covered
+                  const prc = betType === 'ml' ? g.ml_price : g.spread_price
+                  const pfl = betType === 'ml' ? (g.ml_profit ?? 0) : g.profit
+                  return (
+                    <tr key={i} className={won ? 'bet-win' : 'bet-loss'}>
+                      <td>{g.date}</td>
+                      <td className="bet-team">{g.team}</td>
+                      <td>{g.opponent}</td>
+                      <td className="bet-venue">{g.venue}</td>
+                      <td>{formatSpread(g.spread)}</td>
+                      <td>{prc != null ? (prc > 0 ? '+' : '') + prc : '—'}</td>
+                      <td>{g.team_score}-{g.opp_score}</td>
+                      <td className={g.ats_margin > 0 ? 'positive' : 'negative'}>
+                        {g.ats_margin > 0 ? '+' : ''}{g.ats_margin.toFixed(1)}
+                      </td>
+                      <td className={won ? 'covered' : 'missed'}>
+                        {won ? (betType === 'ml' ? 'WIN' : 'COVER') : (betType === 'ml' ? 'LOSS' : 'MISS')}
+                      </td>
+                      <td className={pfl > 0 ? 'positive' : 'negative'}>
+                        {pfl > 0 ? '+' : ''}{pfl.toFixed(2)}u
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

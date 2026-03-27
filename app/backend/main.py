@@ -61,12 +61,34 @@ if _d1_ids_file.exists():
         pass
 
 
+# Normalize ESPN full conference names to short names used in CONFERENCE_MAP
+_CONF_NORMALIZE: dict[str, str] = {
+    "Atlantic Coast": "ACC",
+    "Southeastern": "SEC",
+    "American": "AAC",
+    "Atlantic 10": "A-10",
+    "Mid-American": "MAC",
+    "Missouri Valley": "MVC",
+    "Horizon League": "Horizon",
+    "Coastal Athletic Association": "CAA",
+    "Metro Atlantic Athletic": "MAAC",
+    "Northeast": "NEC",
+    "Ohio Valley": "OVC",
+    "Ivy League": "Ivy",
+    "Patriot League": "Patriot",
+    "Southern": "SoCon",
+    "Mid-Eastern Athletic": "MEAC",
+    "Conference USA": "C-USA",
+}
+
+
 def _get_conference(team_name: str) -> str:
     """Get conference for any team (tournament or D1)."""
     conf = CONFERENCE_MAP.get(team_name, "")
     if not conf:
         tid = D1_TEAM_IDS.get(team_name, "")
-        conf = D1_CONF_MAP.get(tid, "")
+        raw = D1_CONF_MAP.get(tid, "")
+        conf = _CONF_NORMALIZE.get(raw, raw)
     return conf
 
 # ---------------------------------------------------------------------------
@@ -367,6 +389,64 @@ def _enrich_with_spread_prices(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _enrich_with_ml_prices(df: pd.DataFrame) -> pd.DataFrame:
+    """Add closing moneyline price from odds history to each game row."""
+    # Start with game-log ML as default
+    df["ml_price"] = df["closing_fg_ml"].astype(float)
+
+    odf = _get_odds_history()
+    if odf.empty:
+        return df
+
+    h2h = odf[odf["market"] == "h2h"].copy()
+    if h2h.empty:
+        return df
+
+    # Build lookup: (home_odds_name, away_odds_name, outcome) -> last ML price
+    ml_map: dict[tuple[str, str, str], float] = {}
+    for gid, group in h2h.groupby("game_id"):
+        last_snap = group["snapshot_time"].max()
+        snap = group[group["snapshot_time"] == last_snap]
+        available = snap["bookmaker"].unique()
+        chosen = None
+        for b in _BOOK_PREF:
+            if b in available:
+                chosen = b
+                break
+        if not chosen:
+            chosen = available[0]
+        book_rows = snap[snap["bookmaker"] == chosen]
+        home = snap["home_team"].iloc[0]
+        away = snap["away_team"].iloc[0]
+        for _, row in book_rows.iterrows():
+            outcome = row["outcome"]
+            if pd.notna(row["price"]):
+                ml_map[(home, away, outcome)] = float(row["price"])
+
+    # Map prices to game log rows (override game-log ML with odds-history ML)
+    for idx, row in df.iterrows():
+        team = row["team"]
+        team_odds = _CANONICAL_TO_ODDS.get(team, team)
+        opp_name = row.get("opponent", "")
+        opp_canonical = None
+        for t in TEAMS:
+            if opp_name.startswith(t) or t == opp_name:
+                opp_canonical = t
+                break
+        opp_odds = (_CANONICAL_TO_ODDS.get(opp_canonical, opp_name)
+                    if opp_canonical else opp_name)
+        ha = row.get("home_away", "home")
+        if ha in ("home", "neutral"):
+            home_key, away_key = team_odds, opp_odds
+        else:
+            home_key, away_key = opp_odds, team_odds
+        price = ml_map.get((home_key, away_key, team_odds))
+        if price is not None:
+            df.at[idx, "ml_price"] = price
+
+    return df
+
+
 def _load_testable_games(df: pd.DataFrame) -> pd.DataFrame:
     mask = (
         (df["is_tracked"] == True)
@@ -386,31 +466,40 @@ def _load_testable_games(df: pd.DataFrame) -> pd.DataFrame:
     df["is_away"] = (df["home_away"] == "away").astype(int)
     df["is_neutral"] = (df["home_away"] == "neutral").astype(int)
     df["is_conference"] = df["conference_game"].isin([True, "Y"]).astype(int)
+    # ML columns
+    df["ml_covered"] = df["margin"] > 0
+    df["ml_push"] = df["margin"] == 0
     df = _enrich_with_ranks(df)
     df = _enrich_with_spread_prices(df)
+    df = _enrich_with_ml_prices(df)
     return df
 
 
-def _run_backtest(df: pd.DataFrame, mask: pd.Series, name: str) -> dict:
-    filtered = df[mask & ~df["push"]]
+def _run_backtest(
+    df: pd.DataFrame, mask: pd.Series, name: str, bet_type: str = "ats",
+) -> dict:
+    push_col = "push" if bet_type == "ats" else "ml_push"
+    covered_col = "covered" if bet_type == "ats" else "ml_covered"
+    price_col = "spread_price" if bet_type == "ats" else "ml_price"
+
+    filtered = df[mask & ~df[push_col]]
     n = len(filtered)
     if n == 0:
         return {"name": name, "n": 0}
 
-    wins = int(filtered["covered"].sum())
+    wins = int(filtered[covered_col].sum())
     losses = n - wins
     win_pct = wins / n
 
-    # P&L using actual spread prices per game
     total_profit = 0.0
     total_risked = 0.0
     for _, row in filtered.iterrows():
-        price = row.get("spread_price", DEFAULT_JUICE)
+        price = row.get(price_col, DEFAULT_JUICE)
         if pd.isna(price):
             price = DEFAULT_JUICE
         price = float(price)
         stake = _stake_for_price(price)
-        if row["covered"]:
+        if row[covered_col]:
             total_profit += _payout_for_price(price)
         else:
             total_profit -= stake
@@ -1348,6 +1437,7 @@ class BacktestRequest(BaseModel):
     filters: list[dict] = []
     min_games: int = 10
     name: str = "Custom backtest"
+    bet_type: str = "ats"  # "ats" or "ml"
 
 
 class ScanRequest(BaseModel):
@@ -1365,35 +1455,42 @@ def run_backtest(req: BacktestRequest):
     if testable.empty:
         return {"result": {"name": req.name, "n": 0}}
 
+    bt = req.bet_type if req.bet_type in ("ats", "ml") else "ats"
     mask = _build_mask_from_filters(testable, req.filters, req.team)
-    result = _run_backtest(testable, mask, req.name)
+    result = _run_backtest(testable, mask, req.name, bet_type=bt)
 
-    # Also return matched games for the table
-    filtered = testable[mask & ~testable["push"]]
+    push_col = "push" if bt == "ats" else "ml_push"
+    covered_col = "covered" if bt == "ats" else "ml_covered"
+    price_col = "spread_price" if bt == "ats" else "ml_price"
+
+    filtered = testable[mask & ~testable[push_col]]
     game_list = []
     for _, row in filtered.iterrows():
-        price = float(row.get("spread_price", DEFAULT_JUICE))
+        price = float(row.get(price_col, DEFAULT_JUICE))
         if pd.isna(price):
             price = float(DEFAULT_JUICE)
         stake = _stake_for_price(price)
         payout = _payout_for_price(price)
+        won = bool(row[covered_col])
         game_list.append({
             "date": row["date"],
             "team": row["team"],
             "opponent": row["opponent"],
             "home_away": row["home_away"],
             "spread": row.get("closing_fg_spread"),
-            "spread_price": price,
+            "spread_price": float(row.get("spread_price", DEFAULT_JUICE)),
+            "ml_price": float(row.get("ml_price", 0)) if pd.notna(row.get("ml_price")) else None,
             "team_score": int(row["team_score"]),
             "opp_score": int(row["opp_score"]),
             "margin": float(row["margin"]),
             "ats_margin": float(row["ats_margin"]),
             "covered": bool(row["covered"]),
+            "ml_covered": bool(row["ml_covered"]),
             "stake": round(stake, 2),
-            "profit": round(payout if row["covered"] else -stake, 2),
+            "profit": round(payout if won else -stake, 2),
+            "bet_type": bt,
         })
 
-    # Cumulative P&L using actual prices
     pnl = []
     cumulative = 0.0
     for g in game_list:
@@ -1596,6 +1693,293 @@ def list_saved_strategies():
     """List all saved strategy configurations."""
     engine = _get_engine()
     return engine.load_strategies()
+
+
+# ---------------------------------------------------------------------------
+# Trends API
+# ---------------------------------------------------------------------------
+
+SPREAD_BUCKETS = [
+    {"label": "0.5–3", "min": 0.5, "max": 3.0},
+    {"label": "3.5–6", "min": 3.5, "max": 6.0},
+    {"label": "6.5–10", "min": 6.5, "max": 10.0},
+    {"label": "10.5–15", "min": 10.5, "max": 15.0},
+    {"label": "15.5+", "min": 15.5, "max": 999.0},
+]
+
+POWER_5 = {"SEC", "Big Ten", "Big 12", "ACC", "Big East"}
+
+CONF_TIERS: dict[str, list[str]] = {
+    "power5": sorted(["ACC", "Big 12", "Big East", "Big Ten", "SEC"]),
+    "high_major": sorted(["WCC", "Mountain West", "AAC", "MVC", "A-10",
+                           "C-USA"]),
+    "mid_major": sorted([
+        "MAC", "CAA", "Sun Belt", "Big South", "ASUN", "Horizon",
+        "SoCon", "Patriot", "Southland", "Big Sky", "Big West",
+        "Summit", "WAC", "Ivy",
+    ]),
+    "low_major": sorted([
+        "MAAC", "NEC", "OVC", "America East", "SWAC", "MEAC",
+    ]),
+}
+
+# Conference tournament approximate date ranges (2025-26 season)
+CONF_TOURNEY_START = "2026-03-03"
+NCAA_TOURNEY_START = "2026-03-17"
+
+
+def _classify_phase(date: str, is_conference: bool) -> str:
+    """Classify a game into a season phase."""
+    if date >= NCAA_TOURNEY_START:
+        return "ncaa_tournament"
+    if date >= CONF_TOURNEY_START:
+        return "conference_tournament"
+    if is_conference:
+        return "conference_regular"
+    return "non_conference_regular"
+
+
+def _bucket_for_spread(abs_spread: float) -> str:
+    """Return the bucket label for an absolute spread value."""
+    for b in SPREAD_BUCKETS:
+        if b["min"] <= abs_spread <= b["max"]:
+            return b["label"]
+    return SPREAD_BUCKETS[-1]["label"]
+
+
+def _compute_trend_stats(games: list[dict]) -> dict:
+    """Compute record, ROI, and equity curve from a list of game dicts."""
+    if not games:
+        return {"wins": 0, "losses": 0, "n": 0, "win_pct": 0, "roi": 0,
+                "profit": 0, "pnl": []}
+
+    wins = sum(1 for g in games if g["covered"])
+    n = len(games)
+    losses = n - wins
+    win_pct = wins / n if n else 0
+
+    total_profit = 0.0
+    total_risked = 0.0
+    pnl = []
+    cumulative = 0.0
+    for g in games:
+        stake = g["stake"]
+        profit = g["profit"]
+        total_risked += stake
+        total_profit += profit
+        cumulative += profit
+        pnl.append({"date": g["date"], "pnl": round(cumulative, 2)})
+
+    roi = (total_profit / total_risked * 100) if total_risked > 0 else 0
+
+    return {
+        "wins": wins,
+        "losses": losses,
+        "n": n,
+        "win_pct": round(win_pct, 4),
+        "roi": round(roi, 2),
+        "profit": round(total_profit, 2),
+        "pnl": pnl,
+    }
+
+
+@app.get("/api/trends")
+def get_trends():
+    """Compute ATS trend data for favorites/underdogs across venues, spread
+    buckets, and season phases."""
+    df = _get_game_logs()
+    if df.empty:
+        return {"strategies": [], "buckets": [b["label"] for b in SPREAD_BUCKETS]}
+    testable = _load_testable_games(df)
+    if testable.empty:
+        return {"strategies": [], "buckets": [b["label"] for b in SPREAD_BUCKETS]}
+
+    # Deduplicate by event: pick the favorite's row for each game, then
+    # generate both favorite and underdog entries so counts are symmetric.
+    no_push = testable[~testable["push"]].copy()
+    # Index by event_id for looking up both sides
+    event_rows = {}
+    for _, row in no_push.iterrows():
+        eid = str(row["event_id"])
+        event_rows.setdefault(eid, []).append(row)
+
+    seen_events: set[str] = set()
+    all_games = []
+
+    for _, row in no_push.iterrows():
+        eid = str(row["event_id"])
+        if eid in seen_events:
+            continue
+        seen_events.add(eid)
+
+        spread = float(row["closing_fg_spread"])
+        price = row.get("spread_price", DEFAULT_JUICE)
+        if pd.isna(price):
+            price = DEFAULT_JUICE
+        price = float(price)
+        stake = _stake_for_price(price)
+        payout = _payout_for_price(price)
+        margin = float(row["margin"])
+        ats_margin = float(row["ats_margin"])
+        covered = bool(row["covered"])
+        ml_covered = bool(row["ml_covered"])
+        ml_price_raw = row.get("ml_price")
+        has_ml = pd.notna(ml_price_raw) and ml_price_raw != 0
+        is_conf = bool(row["is_conference"])
+        abs_spread = abs(spread)
+        bucket = _bucket_for_spread(abs_spread)
+        phase = _classify_phase(row["date"], is_conf)
+
+        # Determine which side this row represents
+        is_fav = spread < 0
+        team_venue = ("home" if row["is_home"]
+                      else "away" if row["is_away"]
+                      else "neutral")
+        opp_venue_map = {"home": "away", "away": "home", "neutral": "neutral"}
+        opp_venue = opp_venue_map[team_venue]
+
+        fav_name = row["team"] if is_fav else row["opponent"]
+        dog_name = row["opponent"] if is_fav else row["team"]
+        fav_conf = _get_conference(fav_name)
+        dog_conf = _get_conference(dog_name)
+
+        # Resolve ML prices for both sides
+        row_ml = float(ml_price_raw) if has_ml else None
+        opp_ml = None
+        opp_rows = [r for r in event_rows.get(eid, [])
+                     if r["team"] != row["team"]]
+        if opp_rows:
+            oml = opp_rows[0].get("ml_price")
+            if pd.notna(oml) and oml != 0:
+                opp_ml = float(oml)
+        fav_ml = row_ml if is_fav else opp_ml
+        dog_ml = opp_ml if is_fav else row_ml
+
+        def _ml_fields(ml_p: float | None, won: bool) -> dict:
+            if ml_p is None:
+                return {"ml_price": None, "ml_covered": won,
+                        "ml_stake": None, "ml_profit": None}
+            s = _stake_for_price(ml_p)
+            p = _payout_for_price(ml_p)
+            return {"ml_price": ml_p, "ml_covered": won,
+                    "ml_stake": round(s, 2),
+                    "ml_profit": round(p if won else -s, 2)}
+
+        fav_won = ml_covered if is_fav else not ml_covered
+
+        # Favorite entry
+        fav_game = {
+            "date": row["date"],
+            "team": fav_name,
+            "opponent": dog_name,
+            "spread": -abs_spread,
+            "spread_price": price,
+            "team_score": int(row["team_score"] if is_fav else row["opp_score"]),
+            "opp_score": int(row["opp_score"] if is_fav else row["team_score"]),
+            "margin": margin if is_fav else -margin,
+            "ats_margin": ats_margin if is_fav else -ats_margin,
+            "covered": covered if is_fav else not covered,
+            "stake": round(stake, 2),
+            "profit": round(
+                (payout if (covered if is_fav else not covered)
+                 else -stake), 2),
+            "side": "favorite",
+            "venue": team_venue if is_fav else opp_venue,
+            "bucket": bucket,
+            "phase": phase,
+            "conference": fav_conf,
+            **_ml_fields(fav_ml, fav_won),
+        }
+
+        # Underdog entry (mirror)
+        dog_game = {
+            "date": row["date"],
+            "team": dog_name,
+            "opponent": fav_name,
+            "spread": abs_spread,
+            "spread_price": price,
+            "team_score": int(row["opp_score"] if is_fav else row["team_score"]),
+            "opp_score": int(row["team_score"] if is_fav else row["opp_score"]),
+            "margin": -margin if is_fav else margin,
+            "ats_margin": -ats_margin if is_fav else ats_margin,
+            "covered": not covered if is_fav else covered,
+            "stake": round(stake, 2),
+            "profit": round(
+                (payout if (not covered if is_fav else covered)
+                 else -stake), 2),
+            "side": "underdog",
+            "venue": opp_venue if is_fav else team_venue,
+            "bucket": bucket,
+            "phase": phase,
+            "conference": dog_conf,
+            **_ml_fields(dog_ml, not fav_won),
+        }
+
+        all_games.append(fav_game)
+        all_games.append(dog_game)
+
+    # Sort by date for proper equity curve ordering
+    all_games.sort(key=lambda g: g["date"])
+
+    # Phase-to-timeframe mapping
+    TIMEFRAMES = {
+        "all": None,  # no filter
+        "regular": ["conference_regular", "non_conference_regular"],
+        "conference_regular": ["conference_regular"],
+        "non_conference_regular": ["non_conference_regular"],
+        "conference_tournament": ["conference_tournament"],
+        "ncaa_tournament": ["ncaa_tournament"],
+    }
+
+    sides = ["favorite", "underdog"]
+    venues = ["all", "home", "away", "neutral"]
+    buckets = ["all"] + [b["label"] for b in SPREAD_BUCKETS]
+
+    strategies = []
+
+    for side in sides:
+        for venue in venues:
+            for bucket in buckets:
+                # Filter games for this strategy
+                filtered = [g for g in all_games if g["side"] == side]
+                if venue != "all":
+                    filtered = [g for g in filtered if g["venue"] == venue]
+                if bucket != "all":
+                    filtered = [g for g in filtered if g["bucket"] == bucket]
+
+                # Compute stats per timeframe
+                tf_stats = {}
+                for tf_name, phases in TIMEFRAMES.items():
+                    if phases is None:
+                        tf_games = filtered
+                    else:
+                        tf_games = [g for g in filtered if g["phase"] in phases]
+                    tf_stats[tf_name] = _compute_trend_stats(tf_games)
+
+                side_label = "Favorites" if side == "favorite" else "Underdogs"
+                venue_label = (venue.capitalize() if venue != "all" else "All")
+                bucket_label = bucket if bucket != "all" else "All Spreads"
+
+                strategies.append({
+                    "id": f"{side}_{venue}_{bucket}",
+                    "side": side,
+                    "venue": venue,
+                    "bucket": bucket,
+                    "label": f"{side_label} / {venue_label} / {bucket_label}",
+                    "timeframes": tf_stats,
+                })
+
+    # Collect all conferences from the games
+    all_confs = sorted({g["conference"] for g in all_games if g["conference"]})
+
+    return {
+        "strategies": strategies,
+        "buckets": [b["label"] for b in SPREAD_BUCKETS],
+        "games": all_games,
+        "conferences": all_confs,
+        "power5": sorted(POWER_5),
+        "conf_tiers": CONF_TIERS,
+    }
 
 
 # ---------------------------------------------------------------------------
