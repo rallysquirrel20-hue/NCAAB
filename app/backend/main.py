@@ -472,6 +472,7 @@ def _load_testable_games(df: pd.DataFrame) -> pd.DataFrame:
     df = _enrich_with_ranks(df)
     df = _enrich_with_spread_prices(df)
     df = _enrich_with_ml_prices(df)
+
     return df
 
 
@@ -530,65 +531,96 @@ def _run_backtest(
 
 
 def _build_mask_from_filters(
-    df: pd.DataFrame, filters: list[dict], team: str | None
+    df: pd.DataFrame, filters: list[dict], team: str | None,
+    team_conference: str | None = None,
 ) -> pd.Series:
     mask = pd.Series(True, index=df.index)
 
     if team:
         mask = mask & (df["team"] == team)
 
+    if team_conference and team_conference != "all":
+        team_confs = df["team"].map(
+            lambda t: CONFERENCE_MAP.get(t, _get_conference(t))
+        )
+        if team_conference in CONF_TIERS:
+            mask = mask & team_confs.isin(CONF_TIERS[team_conference])
+        else:
+            mask = mask & (team_confs == team_conference)
+
     for f in filters:
         col = f.get("stat", "")
         op = f.get("op", "")
         val = f.get("value")
         compare_col = f.get("compare_col", "")
+        location = f.get("location", "all")
+        conference = f.get("conference", "all")
 
         if col not in df.columns:
             continue
+
+        # Per-filter game-level conditions
+        f_mask = pd.Series(True, index=df.index)
+        if location == "home":
+            f_mask = f_mask & (df["home_away"] == "home")
+        elif location == "away":
+            f_mask = f_mask & (df["home_away"] == "away")
+        elif location == "neutral":
+            f_mask = f_mask & (df["home_away"] == "neutral")
+
+        if conference == "conference":
+            f_mask = f_mask & (df["is_conference"] == 1)
+        elif conference == "nonconference":
+            f_mask = f_mask & (df["is_conference"] == 0)
 
         series = pd.to_numeric(df[col], errors="coerce")
 
         # Column-vs-column comparison (e.g., team_3pt_pct vs opp_def_3pt_pct)
         if compare_col and compare_col in df.columns:
             opp_series = pd.to_numeric(df[compare_col], errors="coerce")
-            diff = series - opp_series
+            # For rank columns, reverse the diff so > means "team is ranked better"
+            # (lower rank number = better, so opp - team > 0 means team is better)
+            is_rank = col.startswith("rank_") or compare_col.startswith("rank_")
+            diff = (opp_series - series) if is_rank else (series - opp_series)
             try:
                 threshold = float(val) if val else 0.0
             except (ValueError, TypeError):
                 threshold = 0.0
             valid = series.notna() & opp_series.notna()
             if op == ">":
-                mask = mask & valid & (diff > threshold)
+                f_mask = f_mask & valid & (diff > threshold)
             elif op == ">=":
-                mask = mask & valid & (diff >= threshold)
+                f_mask = f_mask & valid & (diff >= threshold)
             elif op == "<":
-                mask = mask & valid & (diff < threshold)
+                f_mask = f_mask & valid & (diff < threshold)
             elif op == "<=":
-                mask = mask & valid & (diff <= threshold)
+                f_mask = f_mask & valid & (diff <= threshold)
+            mask = mask & f_mask
             continue
 
         # Fixed-value comparison
         try:
             num_val = float(val)
             if op == ">":
-                mask = mask & (series > num_val)
+                f_mask = f_mask & (series > num_val)
             elif op == ">=":
-                mask = mask & (series >= num_val)
+                f_mask = f_mask & (series >= num_val)
             elif op == "<":
-                mask = mask & (series < num_val)
+                f_mask = f_mask & (series < num_val)
             elif op == "<=":
-                mask = mask & (series <= num_val)
+                f_mask = f_mask & (series <= num_val)
             elif op == "==":
-                mask = mask & (series == num_val)
+                f_mask = f_mask & (series == num_val)
             elif op == "!=":
-                mask = mask & (series != num_val)
+                f_mask = f_mask & (series != num_val)
         except (ValueError, TypeError):
-            # String comparison
             raw = df[col]
             if op == "==":
-                mask = mask & (raw == val)
+                f_mask = f_mask & (raw == val)
             elif op == "!=":
-                mask = mask & (raw != val)
+                f_mask = f_mask & (raw != val)
+
+        mask = mask & f_mask
 
     return mask
 
@@ -817,21 +849,43 @@ def _safe_int(val):
 
 # Stats where higher = better, and stats where lower = better
 _RANKED_STATS = {
-    "team_win_pct": True,
+    # Offense
     "team_ppg": True,
-    "opp_ppg": False,       # points allowed — lower is better
-    "team_ats_win_pct": True,
-    "team_3pt_pct": True,
-    "team_ft_pct": True,
-    "team_2pt_pct": True,
     "team_pace": True,
-    "team_sos": True,
+    "team_ppp": True,
+    "team_3pa_pg": True,
+    "team_3pt_pct": True,
+    "team_3pa_per_poss": True,
+    "team_2pa_pg": True,
+    "team_2pt_pct": True,
+    "team_2pa_per_poss": True,
+    "team_fta_pg": True,
+    "team_ft_pct": True,
+    "team_fta_per_poss": True,
     "team_oreb_pg": True,
-    "team_dreb_pg": True,
-    "team_to_pg": False,     # turnovers — lower is better
-    "team_forced_to_pg": True,
-    "team_def_3pt_pct": False,  # opponent shooting allowed — lower is better
+    "team_oreb_per_poss": True,
+    "team_to_pg": False,
+    "team_to_per_poss": False,
+    # Defense
+    "team_def_ppg": False,
+    "team_def_ppp": False,
+    "team_def_3pt_pct": False,
+    "team_def_3pa_pg": False,
+    "team_def_3pa_per_poss": False,
     "team_def_2pt_pct": False,
+    "team_def_2pa_pg": False,
+    "team_def_2pa_per_poss": False,
+    "team_def_ft_pct": False,
+    "team_def_fta_pg": False,
+    "team_def_fta_per_poss": False,
+    "team_dreb_pg": True,
+    "team_dreb_per_poss": True,
+    "team_forced_to_pg": True,
+    "team_forced_to_per_poss": True,
+    # Record
+    "team_win_pct": True,
+    "team_ats_win_pct": True,
+    "team_sos": True,
 }
 
 _rankings_cache: dict[str, dict] = {}
@@ -1261,13 +1315,25 @@ def get_game_matchup(game_id: str):
         return {"game_id": game_id, "home": {}, "away": {}}
 
     pit_keys = [
-        "team_games", "team_win_pct", "team_ppg", "opp_ppg",
-        "team_ats_games", "team_ats_win_pct",
-        "team_ft_pct", "team_3pt_pct", "team_2pt_pct",
-        "team_def_ft_pct", "team_def_3pt_pct", "team_def_2pt_pct",
-        "team_oreb_pg", "team_dreb_pg",
-        "team_to_pg", "team_forced_to_pg",
-        "team_pace", "team_sos",
+        # Record
+        "team_games", "team_win_pct", "team_ats_games", "team_ats_win_pct",
+        "team_ats_margin_wins", "team_ats_margin_losses",
+        "team_sos",
+        # Offense
+        "team_ppg", "team_pace", "team_ppp",
+        "team_3pa_pg", "team_3pt_pct", "team_3pa_per_poss",
+        "team_2pa_pg", "team_2pt_pct", "team_2pa_per_poss",
+        "team_fta_pg", "team_ft_pct", "team_fta_per_poss",
+        "team_oreb_pg", "team_oreb_per_poss",
+        "team_to_pg", "team_to_per_poss",
+        # Defense
+        "team_def_ppg", "team_def_ppp",
+        "team_def_3pa_pg", "team_def_3pt_pct", "team_def_3pa_per_poss",
+        "team_def_2pa_pg", "team_def_2pt_pct", "team_def_2pa_per_poss",
+        "team_def_fta_pg", "team_def_ft_pct", "team_def_fta_per_poss",
+        "team_dreb_pg", "team_dreb_per_poss",
+        "team_forced_to_pg", "team_forced_to_per_poss",
+        # Location splits
         "team_home_win_pct", "team_away_win_pct",
         "team_home_ppg", "team_away_ppg",
     ]
@@ -1434,6 +1500,7 @@ def get_team_detail(team_name: str):
 
 class BacktestRequest(BaseModel):
     team: str | None = None
+    team_conference: str | None = None  # "all", tier key, or conference name
     filters: list[dict] = []
     min_games: int = 10
     name: str = "Custom backtest"
@@ -1456,7 +1523,7 @@ def run_backtest(req: BacktestRequest):
         return {"result": {"name": req.name, "n": 0}}
 
     bt = req.bet_type if req.bet_type in ("ats", "ml") else "ats"
-    mask = _build_mask_from_filters(testable, req.filters, req.team)
+    mask = _build_mask_from_filters(testable, req.filters, req.team, req.team_conference)
     result = _run_backtest(testable, mask, req.name, bet_type=bt)
 
     push_col = "push" if bt == "ats" else "ml_push"
@@ -1529,6 +1596,12 @@ def run_scan(req: ScanRequest):
 # -- Stat columns metadata for frontend filter builder --
 
 
+@app.get("/api/conferences")
+def get_conferences():
+    """Return conference tiers and individual conferences for filtering."""
+    return {"tiers": CONF_TIERS}
+
+
 @app.get("/api/columns")
 def get_columns():
     """Return available stat columns grouped by category for the filter builder.
@@ -1536,64 +1609,93 @@ def get_columns():
     Each entry is {col, label} so the frontend can show human-readable names.
     """
     return {
-        "record": [
-            {"col": "team_games", "label": "Team Games"},
-            {"col": "team_win_pct", "label": "Team Win %"},
-            {"col": "team_home_win_pct", "label": "Team Home Win %"},
-            {"col": "team_away_win_pct", "label": "Team Away Win %"},
-            {"col": "team_neutral_win_pct", "label": "Team Neutral Win %"},
-            {"col": "opp_games", "label": "Opp Games"},
-            {"col": "opp_win_pct", "label": "Opp Win %"},
-        ],
-        "ats": [
-            {"col": "team_ats_games", "label": "Team ATS Games"},
-            {"col": "team_ats_win_pct", "label": "Team ATS %"},
-            {"col": "team_home_ats_win_pct", "label": "Team Home ATS %"},
-            {"col": "team_away_ats_win_pct", "label": "Team Away ATS %"},
-            {"col": "opp_ats_games", "label": "Opp ATS Games"},
-            {"col": "opp_ats_win_pct", "label": "Opp ATS %"},
-        ],
-        "scoring": [
-            {"col": "team_ppg", "label": "Team Off PPG"},
-            {"col": "opp_ppg", "label": "Team Def PPG (pts allowed)"},
-            {"col": "team_home_ppg", "label": "Team Home PPG"},
-            {"col": "team_away_ppg", "label": "Team Away PPG"},
-            {"col": "opp_home_ppg", "label": "Opp Home PPG"},
-            {"col": "opp_away_ppg", "label": "Opp Away PPG"},
-        ],
-        "shooting": [
-            {"col": "team_ft_pct", "label": "Team FT %"},
-            {"col": "team_3pt_pct", "label": "Team 3PT %"},
-            {"col": "team_2pt_pct", "label": "Team 2PT %"},
-            {"col": "opp_ft_pct", "label": "Opp FT %"},
-            {"col": "opp_3pt_pct", "label": "Opp 3PT %"},
-            {"col": "opp_2pt_pct", "label": "Opp 2PT %"},
+        "offense": [
+            {"col": "team_ppg", "label": "PPG"},
+            {"col": "team_pace", "label": "Possessions/G"},
+            {"col": "team_ppp", "label": "Points/Possession"},
+            {"col": "team_3pa_pg", "label": "3PA/G"},
+            {"col": "team_3pt_pct", "label": "3PT %"},
+            {"col": "team_3pa_per_poss", "label": "3PA/Possession"},
+            {"col": "team_2pa_pg", "label": "2PA/G"},
+            {"col": "team_2pt_pct", "label": "2PT %"},
+            {"col": "team_2pa_per_poss", "label": "2PA/Possession"},
+            {"col": "team_fta_pg", "label": "FTA/G"},
+            {"col": "team_ft_pct", "label": "FT %"},
+            {"col": "team_fta_per_poss", "label": "FTA/Possession"},
+            {"col": "team_oreb_pg", "label": "OREB/G"},
+            {"col": "team_oreb_per_poss", "label": "OREB/Possession"},
+            {"col": "team_to_pg", "label": "TO/G"},
+            {"col": "team_to_per_poss", "label": "TO/Possession"},
         ],
         "defense": [
-            {"col": "team_def_ft_pct", "label": "Team Def FT % (allowed)"},
-            {"col": "team_def_3pt_pct", "label": "Team Def 3PT % (allowed)"},
-            {"col": "team_def_2pt_pct", "label": "Team Def 2PT % (allowed)"},
-            {"col": "opp_def_ft_pct", "label": "Opp Def FT % (allowed)"},
-            {"col": "opp_def_3pt_pct", "label": "Opp Def 3PT % (allowed)"},
-            {"col": "opp_def_2pt_pct", "label": "Opp Def 2PT % (allowed)"},
+            {"col": "team_def_ppg", "label": "Def PPG"},
+            {"col": "team_pace", "label": "Possessions/G"},
+            {"col": "team_def_ppp", "label": "Def Points/Possession"},
+            {"col": "team_def_3pa_pg", "label": "Opp 3PA/G"},
+            {"col": "team_def_3pt_pct", "label": "Opp 3PT %"},
+            {"col": "team_def_3pa_per_poss", "label": "Opp 3PA/Possession"},
+            {"col": "team_def_2pa_pg", "label": "Opp 2PA/G"},
+            {"col": "team_def_2pt_pct", "label": "Opp 2PT %"},
+            {"col": "team_def_2pa_per_poss", "label": "Opp 2PA/Possession"},
+            {"col": "team_def_fta_pg", "label": "Opp FTA/G"},
+            {"col": "team_def_ft_pct", "label": "Opp FT %"},
+            {"col": "team_def_fta_per_poss", "label": "Opp FTA/Possession"},
+            {"col": "team_dreb_pg", "label": "DREB/G"},
+            {"col": "team_dreb_per_poss", "label": "DREB/Possession"},
+            {"col": "team_forced_to_pg", "label": "Forced TO/G"},
+            {"col": "team_forced_to_per_poss", "label": "Forced TO/Possession"},
         ],
-        "rebounding": [
-            {"col": "team_oreb_pg", "label": "Team OREB/G"},
-            {"col": "team_dreb_pg", "label": "Team DREB/G"},
-            {"col": "opp_oreb_pg", "label": "Opp OREB/G"},
-            {"col": "opp_dreb_pg", "label": "Opp DREB/G"},
+        "opp_offense": [
+            {"col": "opp_ppg", "label": "PPG"},
+            {"col": "opp_pace", "label": "Possessions/G"},
+            {"col": "opp_ppp", "label": "Points/Possession"},
+            {"col": "opp_3pa_pg", "label": "3PA/G"},
+            {"col": "opp_3pt_pct", "label": "3PT %"},
+            {"col": "opp_3pa_per_poss", "label": "3PA/Possession"},
+            {"col": "opp_2pa_pg", "label": "2PA/G"},
+            {"col": "opp_2pt_pct", "label": "2PT %"},
+            {"col": "opp_2pa_per_poss", "label": "2PA/Possession"},
+            {"col": "opp_fta_pg", "label": "FTA/G"},
+            {"col": "opp_ft_pct", "label": "FT %"},
+            {"col": "opp_fta_per_poss", "label": "FTA/Possession"},
+            {"col": "opp_oreb_pg", "label": "OREB/G"},
+            {"col": "opp_oreb_per_poss", "label": "OREB/Possession"},
+            {"col": "opp_to_pg", "label": "TO/G"},
+            {"col": "opp_to_per_poss", "label": "TO/Possession"},
         ],
-        "turnovers": [
-            {"col": "team_to_pg", "label": "Team TO/G"},
-            {"col": "team_forced_to_pg", "label": "Team Forced TO/G"},
-            {"col": "opp_to_pg", "label": "Opp TO/G"},
-            {"col": "opp_forced_to_pg", "label": "Opp Forced TO/G"},
+        "opp_defense": [
+            {"col": "opp_def_ppg", "label": "Def PPG"},
+            {"col": "opp_pace", "label": "Possessions/G"},
+            {"col": "opp_def_ppp", "label": "Def Points/Possession"},
+            {"col": "opp_def_3pa_pg", "label": "Opp 3PA/G"},
+            {"col": "opp_def_3pt_pct", "label": "Opp 3PT %"},
+            {"col": "opp_def_3pa_per_poss", "label": "Opp 3PA/Possession"},
+            {"col": "opp_def_2pa_pg", "label": "Opp 2PA/G"},
+            {"col": "opp_def_2pt_pct", "label": "Opp 2PT %"},
+            {"col": "opp_def_2pa_per_poss", "label": "Opp 2PA/Possession"},
+            {"col": "opp_def_fta_pg", "label": "Opp FTA/G"},
+            {"col": "opp_def_ft_pct", "label": "Opp FT %"},
+            {"col": "opp_def_fta_per_poss", "label": "Opp FTA/Possession"},
+            {"col": "opp_dreb_pg", "label": "DREB/G"},
+            {"col": "opp_dreb_per_poss", "label": "DREB/Possession"},
+            {"col": "opp_forced_to_pg", "label": "Forced TO/G"},
+            {"col": "opp_forced_to_per_poss", "label": "Forced TO/Possession"},
         ],
-        "pace_sos": [
-            {"col": "team_pace", "label": "Team Pace"},
-            {"col": "team_sos", "label": "Team SOS"},
-            {"col": "opp_pace", "label": "Opp Pace"},
-            {"col": "opp_sos", "label": "Opp SOS"},
+        "record": [
+            {"col": "team_win_pct", "label": "Win %"},
+            {"col": "team_ats_win_pct", "label": "ATS Win %"},
+            {"col": "team_ats_margin_wins", "label": "ATS Margin (Wins)"},
+            {"col": "team_ats_margin_losses", "label": "ATS Margin (Losses)"},
+            {"col": "is_favorite", "label": "Is Favorite"},
+            {"col": "is_underdog", "label": "Is Underdog"},
+            {"col": "team_sos", "label": "SOS"},
+        ],
+        "opp_record": [
+            {"col": "opp_win_pct", "label": "Win %"},
+            {"col": "opp_ats_win_pct", "label": "ATS Win %"},
+            {"col": "opp_ats_margin_wins", "label": "ATS Margin (Wins)"},
+            {"col": "opp_ats_margin_losses", "label": "ATS Margin (Losses)"},
+            {"col": "opp_sos", "label": "SOS"},
         ],
         "odds": [
             {"col": "opening_fg_spread", "label": "Opening Spread"},
@@ -1601,47 +1703,85 @@ def get_columns():
             {"col": "opening_fg_ml", "label": "Opening ML"},
             {"col": "closing_fg_ml", "label": "Closing ML"},
         ],
-        "side": [
-            {"col": "is_favorite", "label": "Is Favorite (1/0)"},
-            {"col": "is_underdog", "label": "Is Underdog (1/0)"},
-            {"col": "is_home", "label": "Is Home (1/0)"},
-            {"col": "is_away", "label": "Is Away (1/0)"},
-            {"col": "is_neutral", "label": "Is Neutral Site (1/0)"},
-            {"col": "is_conference", "label": "Is Conference Game (1/0)"},
+        "offense_ranks": [
+            {"col": "rank_team_ppg", "label": "PPG Rank"},
+            {"col": "rank_team_pace", "label": "Possessions/G Rank"},
+            {"col": "rank_team_ppp", "label": "Points/Possession Rank"},
+            {"col": "rank_team_3pt_pct", "label": "3PT % Rank"},
+            {"col": "rank_team_3pa_pg", "label": "3PA/G Rank"},
+            {"col": "rank_team_3pa_per_poss", "label": "3PA/Possession Rank"},
+            {"col": "rank_team_2pt_pct", "label": "2PT % Rank"},
+            {"col": "rank_team_2pa_pg", "label": "2PA/G Rank"},
+            {"col": "rank_team_2pa_per_poss", "label": "2PA/Possession Rank"},
+            {"col": "rank_team_ft_pct", "label": "FT % Rank"},
+            {"col": "rank_team_fta_pg", "label": "FTA/G Rank"},
+            {"col": "rank_team_fta_per_poss", "label": "FTA/Possession Rank"},
+            {"col": "rank_team_oreb_pg", "label": "OREB/G Rank"},
+            {"col": "rank_team_oreb_per_poss", "label": "OREB/Possession Rank"},
+            {"col": "rank_team_to_pg", "label": "TO/G Rank"},
+            {"col": "rank_team_to_per_poss", "label": "TO/Possession Rank"},
         ],
-        "location": [
-            {"col": "home_away", "label": "Home/Away"},
-            {"col": "conference_game", "label": "Conference Game"},
+        "defense_ranks": [
+            {"col": "rank_team_def_ppg", "label": "Def PPG Rank"},
+            {"col": "rank_team_def_ppp", "label": "Def Points/Possession Rank"},
+            {"col": "rank_team_def_3pt_pct", "label": "Opp 3PT % Rank"},
+            {"col": "rank_team_def_3pa_pg", "label": "Opp 3PA/G Rank"},
+            {"col": "rank_team_def_3pa_per_poss", "label": "Opp 3PA/Possession Rank"},
+            {"col": "rank_team_def_2pt_pct", "label": "Opp 2PT % Rank"},
+            {"col": "rank_team_def_2pa_pg", "label": "Opp 2PA/G Rank"},
+            {"col": "rank_team_def_2pa_per_poss", "label": "Opp 2PA/Possession Rank"},
+            {"col": "rank_team_def_ft_pct", "label": "Opp FT % Rank"},
+            {"col": "rank_team_def_fta_pg", "label": "Opp FTA/G Rank"},
+            {"col": "rank_team_def_fta_per_poss", "label": "Opp FTA/Possession Rank"},
+            {"col": "rank_team_dreb_pg", "label": "DREB/G Rank"},
+            {"col": "rank_team_dreb_per_poss", "label": "DREB/Possession Rank"},
+            {"col": "rank_team_forced_to_pg", "label": "Forced TO/G Rank"},
+            {"col": "rank_team_forced_to_per_poss", "label": "Forced TO/Possession Rank"},
         ],
-        "ranks": [
-            {"col": "rank_team_win_pct", "label": "Team Win % Rank"},
-            {"col": "rank_team_ppg", "label": "Team PPG Rank"},
-            {"col": "rank_team_ats_win_pct", "label": "Team ATS % Rank"},
-            {"col": "rank_team_3pt_pct", "label": "Team 3PT % Rank"},
-            {"col": "rank_team_ft_pct", "label": "Team FT % Rank"},
-            {"col": "rank_team_2pt_pct", "label": "Team 2PT % Rank"},
-            {"col": "rank_team_pace", "label": "Team Pace Rank"},
-            {"col": "rank_team_sos", "label": "Team SOS Rank"},
-            {"col": "rank_team_oreb_pg", "label": "Team OREB/G Rank"},
-            {"col": "rank_team_dreb_pg", "label": "Team DREB/G Rank"},
-            {"col": "rank_team_to_pg", "label": "Team TO/G Rank"},
-            {"col": "rank_team_forced_to_pg", "label": "Team Forced TO/G Rank"},
-            {"col": "rank_team_def_3pt_pct", "label": "Team Def 3PT % Rank"},
-            {"col": "rank_team_def_2pt_pct", "label": "Team Def 2PT % Rank"},
-            {"col": "rank_opp_win_pct", "label": "Opp Win % Rank"},
-            {"col": "rank_opp_ppg", "label": "Opp PPG Rank"},
-            {"col": "rank_opp_ats_win_pct", "label": "Opp ATS % Rank"},
-            {"col": "rank_opp_3pt_pct", "label": "Opp 3PT % Rank"},
-            {"col": "rank_opp_ft_pct", "label": "Opp FT % Rank"},
-            {"col": "rank_opp_2pt_pct", "label": "Opp 2PT % Rank"},
-            {"col": "rank_opp_pace", "label": "Opp Pace Rank"},
-            {"col": "rank_opp_sos", "label": "Opp SOS Rank"},
-            {"col": "rank_opp_oreb_pg", "label": "Opp OREB/G Rank"},
-            {"col": "rank_opp_dreb_pg", "label": "Opp DREB/G Rank"},
-            {"col": "rank_opp_to_pg", "label": "Opp TO/G Rank"},
-            {"col": "rank_opp_forced_to_pg", "label": "Opp Forced TO/G Rank"},
-            {"col": "rank_opp_def_3pt_pct", "label": "Opp Def 3PT % Rank"},
-            {"col": "rank_opp_def_2pt_pct", "label": "Opp Def 2PT % Rank"},
+        "opp_offense_ranks": [
+            {"col": "rank_opp_ppg", "label": "PPG Rank"},
+            {"col": "rank_opp_pace", "label": "Possessions/G Rank"},
+            {"col": "rank_opp_ppp", "label": "Points/Possession Rank"},
+            {"col": "rank_opp_3pt_pct", "label": "3PT % Rank"},
+            {"col": "rank_opp_3pa_pg", "label": "3PA/G Rank"},
+            {"col": "rank_opp_3pa_per_poss", "label": "3PA/Possession Rank"},
+            {"col": "rank_opp_2pt_pct", "label": "2PT % Rank"},
+            {"col": "rank_opp_2pa_pg", "label": "2PA/G Rank"},
+            {"col": "rank_opp_2pa_per_poss", "label": "2PA/Possession Rank"},
+            {"col": "rank_opp_ft_pct", "label": "FT % Rank"},
+            {"col": "rank_opp_fta_pg", "label": "FTA/G Rank"},
+            {"col": "rank_opp_fta_per_poss", "label": "FTA/Possession Rank"},
+            {"col": "rank_opp_oreb_pg", "label": "OREB/G Rank"},
+            {"col": "rank_opp_oreb_per_poss", "label": "OREB/Possession Rank"},
+            {"col": "rank_opp_to_pg", "label": "TO/G Rank"},
+            {"col": "rank_opp_to_per_poss", "label": "TO/Possession Rank"},
+        ],
+        "opp_defense_ranks": [
+            {"col": "rank_opp_def_ppg", "label": "Def PPG Rank"},
+            {"col": "rank_opp_def_ppp", "label": "Def Points/Possession Rank"},
+            {"col": "rank_opp_def_3pt_pct", "label": "Opp 3PT % Rank"},
+            {"col": "rank_opp_def_3pa_pg", "label": "Opp 3PA/G Rank"},
+            {"col": "rank_opp_def_3pa_per_poss", "label": "Opp 3PA/Possession Rank"},
+            {"col": "rank_opp_def_2pt_pct", "label": "Opp 2PT % Rank"},
+            {"col": "rank_opp_def_2pa_pg", "label": "Opp 2PA/G Rank"},
+            {"col": "rank_opp_def_2pa_per_poss", "label": "Opp 2PA/Possession Rank"},
+            {"col": "rank_opp_def_ft_pct", "label": "Opp FT % Rank"},
+            {"col": "rank_opp_def_fta_pg", "label": "Opp FTA/G Rank"},
+            {"col": "rank_opp_def_fta_per_poss", "label": "Opp FTA/Possession Rank"},
+            {"col": "rank_opp_dreb_pg", "label": "DREB/G Rank"},
+            {"col": "rank_opp_dreb_per_poss", "label": "DREB/Possession Rank"},
+            {"col": "rank_opp_forced_to_pg", "label": "Forced TO/G Rank"},
+            {"col": "rank_opp_forced_to_per_poss", "label": "Forced TO/Possession Rank"},
+        ],
+        "record_ranks": [
+            {"col": "rank_team_win_pct", "label": "Win % Rank"},
+            {"col": "rank_team_ats_win_pct", "label": "ATS Win % Rank"},
+            {"col": "rank_team_sos", "label": "SOS Rank"},
+        ],
+        "opp_record_ranks": [
+            {"col": "rank_opp_win_pct", "label": "Win % Rank"},
+            {"col": "rank_opp_ats_win_pct", "label": "ATS Win % Rank"},
+            {"col": "rank_opp_sos", "label": "SOS Rank"},
         ],
     }
 

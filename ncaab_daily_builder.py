@@ -409,6 +409,14 @@ PIT_COLUMNS = [
     "team_to_pg", "team_forced_to_pg",
     # Team pace & SOS
     "team_pace", "team_sos",
+    # Team derived per-possession & efficiency
+    "team_ppp", "team_def_ppg", "team_def_ppp",
+    "team_3pa_per_poss", "team_2pa_per_poss", "team_fta_per_poss",
+    "team_oreb_per_poss", "team_to_per_poss",
+    "team_def_3pa_per_poss", "team_def_2pa_per_poss", "team_def_fta_per_poss",
+    "team_dreb_per_poss", "team_forced_to_per_poss",
+    # Team ATS margin running averages
+    "team_ats_margin_wins", "team_ats_margin_losses",
     # Opponent offensive shooting
     "opp_ftm_pg", "opp_fta_pg", "opp_ft_pct",
     "opp_3pm_pg", "opp_3pa_pg", "opp_3pt_pct",
@@ -422,6 +430,14 @@ PIT_COLUMNS = [
     "opp_to_pg", "opp_forced_to_pg",
     # Opponent pace & SOS
     "opp_pace", "opp_sos",
+    # Opponent derived per-possession & efficiency
+    "opp_ppp", "opp_def_ppg", "opp_def_ppp",
+    "opp_3pa_per_poss", "opp_2pa_per_poss", "opp_fta_per_poss",
+    "opp_oreb_per_poss", "opp_to_per_poss",
+    "opp_def_3pa_per_poss", "opp_def_2pa_per_poss", "opp_def_fta_per_poss",
+    "opp_dreb_per_poss", "opp_forced_to_per_poss",
+    # Opponent ATS margin running averages
+    "opp_ats_margin_wins", "opp_ats_margin_losses",
 ]
 
 ALL_COLUMNS = RAW_COLUMNS + ODDS_COLUMNS + PIT_COLUMNS
@@ -1699,6 +1715,14 @@ _NEW_PIT_KEYS = [
     "oreb_pg", "dreb_pg",
     "to_pg", "forced_to_pg",
     "pace", "sos",
+    # Derived per-possession & efficiency
+    "ppp", "def_ppg", "def_ppp",
+    "3pa_per_poss", "2pa_per_poss", "fta_per_poss",
+    "oreb_per_poss", "to_per_poss",
+    "def_3pa_per_poss", "def_2pa_per_poss", "def_fta_per_poss",
+    "dreb_per_poss", "forced_to_per_poss",
+    # ATS margin running averages
+    "ats_margin_wins", "ats_margin_losses",
 ]
 
 
@@ -1764,6 +1788,10 @@ def phase3_compute_pit(
 
         sos_sum, sos_count = 0, 0
         bg = 0  # games with boxscore data
+
+        # ATS margin running averages
+        ats_margin_win_sum, ats_margin_win_count = 0.0, 0
+        ats_margin_loss_sum, ats_margin_loss_count = 0.0, 0
 
         team_pit: dict[str, dict] = {}
 
@@ -1832,14 +1860,50 @@ def phase3_compute_pit(
 
                 # Pace (possessions per game)
                 poss = s_fga - s_oreb + s_to + 0.475 * s_fta
-                entry["pace"] = round(poss / bg, 1)
+                pace_pg = round(poss / bg, 1)
+                entry["pace"] = pace_pg
+
+                # Derived per-possession stats
+                if pace_pg > 0:
+                    ppg_val = tp / tg if tg else 0
+                    entry["ppp"] = round(ppg_val / pace_pg, 2)
+
+                    # Defensive PPG & PPP
+                    def_ppg_val = (d_2pm * 2 + d_3pm * 3 + d_ftm) / bg
+                    entry["def_ppg"] = round(def_ppg_val, 1)
+                    entry["def_ppp"] = round(def_ppg_val / pace_pg, 2)
+
+                    # Offense per-possession
+                    entry["3pa_per_poss"] = round((s_3pa / bg) / pace_pg, 2)
+                    entry["2pa_per_poss"] = round((s_2pa / bg) / pace_pg, 2)
+                    entry["fta_per_poss"] = round((s_fta / bg) / pace_pg, 2)
+                    entry["oreb_per_poss"] = round((s_oreb / bg) / pace_pg, 2)
+                    entry["to_per_poss"] = round((s_to / bg) / pace_pg, 2)
+
+                    # Defense per-possession
+                    entry["def_3pa_per_poss"] = round((d_3pa / bg) / pace_pg, 2)
+                    entry["def_2pa_per_poss"] = round((d_2pa / bg) / pace_pg, 2)
+                    entry["def_fta_per_poss"] = round((d_fta / bg) / pace_pg, 2)
+                    entry["dreb_per_poss"] = round((s_dreb / bg) / pace_pg, 2)
+                    entry["forced_to_per_poss"] = round((d_to / bg) / pace_pg, 2)
+                else:
+                    for k in ["ppp", "def_ppg", "def_ppp",
+                              "3pa_per_poss", "2pa_per_poss", "fta_per_poss",
+                              "oreb_per_poss", "to_per_poss",
+                              "def_3pa_per_poss", "def_2pa_per_poss", "def_fta_per_poss",
+                              "dreb_per_poss", "forced_to_per_poss"]:
+                        entry[k] = None
             else:
                 for k in _NEW_PIT_KEYS:
-                    if k != "sos":
-                        entry[k] = ""
+                    if k not in ("sos", "ats_margin_wins", "ats_margin_losses"):
+                        entry[k] = None
 
             # SOS (uses all games, not just boxscore games)
-            entry["sos"] = round(sos_sum / sos_count, 1) if sos_count else ""
+            entry["sos"] = round(sos_sum / sos_count, 1) if sos_count else None
+
+            # ATS margin running averages (PIT — before this game)
+            entry["ats_margin_wins"] = round(ats_margin_win_sum / ats_margin_win_count, 1) if ats_margin_win_count else None
+            entry["ats_margin_losses"] = round(ats_margin_loss_sum / ats_margin_loss_count, 1) if ats_margin_loss_count else None
 
             team_pit[eid] = entry
 
@@ -1881,6 +1945,14 @@ def phase3_compute_pit(
                     if ha == "home": ats_hp += 1
                     elif ha == "neutral": ats_np += 1
                     else: ats_ap += 1
+
+                # ATS margin running averages
+                if ats_val > 0:
+                    ats_margin_win_sum += ats_val
+                    ats_margin_win_count += 1
+                elif ats_val < 0:
+                    ats_margin_loss_sum += ats_val
+                    ats_margin_loss_count += 1
 
             # Boxscore counters (only if data exists)
             if pd.notna(row.get("team_fgm")):

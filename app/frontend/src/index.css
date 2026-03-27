@@ -124,7 +124,6 @@ html, body, #root {
 }
 
 .game-card.expanded {
-  grid-column: 1 / -1;
   cursor: default;
 }
 
@@ -488,6 +487,17 @@ td.ot-line {
   font-weight: normal !important;
 }
 
+.mu-section {
+  font-size: 10px;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--cyan);
+  padding: 6px 0 2px 0 !important;
+  border-bottom: 1px solid var(--border-color);
+  text-align: center;
+}
+
 .stat-better {
   color: var(--color-blue);
 }
@@ -527,7 +537,7 @@ td.ot-line {
 }
 
 .backtest-sidebar {
-  width: 380px;
+  width: 420px;
   flex-shrink: 0;
   overflow-y: auto;
   padding-right: 16px;
@@ -539,12 +549,47 @@ td.ot-line {
   overflow-y: auto;
 }
 
+.filter-group {
+  margin-bottom: 6px;
+  padding: 5px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-card);
+  display: flex;
+  gap: 4px;
+  align-items: stretch;
+}
+
+.filter-group .filter-rows {
+  flex: 1;
+  min-width: 0;
+}
+
+.filter-group .filter-remove {
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  background: var(--red, #dc322f);
+  color: #fff;
+  border-color: var(--red, #dc322f);
+  border-radius: 3px;
+  cursor: pointer;
+  align-self: stretch;
+  aspect-ratio: 1;
+  flex-shrink: 0;
+  min-width: 28px;
+}
+
 .filter-row {
   display: flex;
   gap: 4px;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
   align-items: center;
 }
+
+.filter-row:last-child { margin-bottom: 0; }
 
 .filter-row select,
 .filter-row input {
@@ -554,11 +599,33 @@ td.ot-line {
   border: 1px solid var(--border-color);
   background: var(--bg-main);
   color: var(--text-main);
+  min-width: 0;
 }
 
-.filter-row select { width: 140px; }
-.filter-row select.op { width: 50px; }
-.filter-row input { width: 70px; }
+.filter-row select { flex: 1 1 0; width: 0; }
+.filter-row select.op { flex: 1 1 0; width: 0; }
+.filter-row input { flex: 1 1 0; width: 0; }
+
+.filter-row .toggle-btn {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 3px 4px;
+  border: 1px solid var(--cyan);
+  background: var(--cyan);
+  color: var(--base03);
+  box-sizing: border-box;
+  height: 22px;
+}
+
+.filter-row select,
+.filter-row input,
+.filter-row .toggle-btn {
+  height: 22px;
+  box-sizing: border-box;
+}
 
 .btn {
   font-family: inherit;

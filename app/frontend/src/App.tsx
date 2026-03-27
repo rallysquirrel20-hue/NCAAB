@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import axios from 'axios'
 import { createChart, LineSeries } from 'lightweight-charts'
 import type { IChartApi } from 'lightweight-charts'
@@ -93,9 +93,14 @@ interface PnlPoint {
 
 interface Filter {
   stat: string
+  location: string      // "all" | "home" | "away" | "neutral"
+  conference: string    // "all" | "conference" | "nonconference"
   op: string
+  compare_mode: 'value' | 'stat'
   value: string
-  compare_col?: string  // column-vs-column mode
+  compare_col: string   // column for stat-vs-stat mode
+  compare_location: string
+  compare_conference: string
 }
 
 interface ColEntry {
@@ -171,23 +176,53 @@ function getStatusLabel(status: string, detail: string): string {
 // MatchupTable Component
 // ============================================================================
 
-const MATCHUP_STATS: Array<{ key: string; label: string; higherBetter: boolean }> = [
-  { key: 'team_win_pct', label: 'Win %', higherBetter: true },
-  { key: 'team_ats_win_pct', label: 'ATS %', higherBetter: true },
-  { key: 'team_ppg', label: 'Off PPG', higherBetter: true },
-  { key: 'opp_ppg', label: 'Def PPG', higherBetter: false },
-  { key: 'team_3pt_pct', label: '3PT %', higherBetter: true },
-  { key: 'team_2pt_pct', label: '2PT %', higherBetter: true },
-  { key: 'team_ft_pct', label: 'FT %', higherBetter: true },
-  { key: 'team_def_3pt_pct', label: 'Def 3PT %', higherBetter: false },
-  { key: 'team_def_2pt_pct', label: 'Def 2PT %', higherBetter: false },
-  { key: 'team_oreb_pg', label: 'OREB/G', higherBetter: true },
-  { key: 'team_dreb_pg', label: 'DREB/G', higherBetter: true },
-  { key: 'team_to_pg', label: 'TO/G', higherBetter: false },
-  { key: 'team_forced_to_pg', label: 'Forced TO/G', higherBetter: true },
-  { key: 'team_pace', label: 'Pace', higherBetter: true },
-  { key: 'team_sos', label: 'SOS', higherBetter: false },
+const MATCHUP_STAT_GROUPS: Array<{ section: string; stats: Array<{ key: string; label: string; higherBetter: boolean }> }> = [
+  { section: 'Record', stats: [
+    { key: 'team_win_pct', label: 'Win %', higherBetter: true },
+    { key: 'team_ats_win_pct', label: 'ATS %', higherBetter: true },
+    { key: 'team_ats_margin_wins', label: 'ATS Margin (W)', higherBetter: true },
+    { key: 'team_ats_margin_losses', label: 'ATS Margin (L)', higherBetter: true },
+    { key: 'team_sos', label: 'SOS', higherBetter: false },
+  ]},
+  { section: 'Offense', stats: [
+    { key: 'team_ppg', label: 'PPG', higherBetter: true },
+    { key: 'team_pace', label: 'Poss/G', higherBetter: true },
+    { key: 'team_ppp', label: 'Pts/Poss', higherBetter: true },
+    { key: 'team_3pa_pg', label: '3PA/G', higherBetter: true },
+    { key: 'team_3pt_pct', label: '3PT %', higherBetter: true },
+    { key: 'team_3pa_per_poss', label: '3PA/Poss', higherBetter: true },
+    { key: 'team_2pa_pg', label: '2PA/G', higherBetter: true },
+    { key: 'team_2pt_pct', label: '2PT %', higherBetter: true },
+    { key: 'team_2pa_per_poss', label: '2PA/Poss', higherBetter: true },
+    { key: 'team_fta_pg', label: 'FTA/G', higherBetter: true },
+    { key: 'team_ft_pct', label: 'FT %', higherBetter: true },
+    { key: 'team_fta_per_poss', label: 'FTA/Poss', higherBetter: true },
+    { key: 'team_oreb_pg', label: 'OREB/G', higherBetter: true },
+    { key: 'team_oreb_per_poss', label: 'OREB/Poss', higherBetter: true },
+    { key: 'team_to_pg', label: 'TO/G', higherBetter: false },
+    { key: 'team_to_per_poss', label: 'TO/Poss', higherBetter: false },
+  ]},
+  { section: 'Defense', stats: [
+    { key: 'team_def_ppg', label: 'Def PPG', higherBetter: false },
+    { key: 'team_def_ppp', label: 'Def Pts/Poss', higherBetter: false },
+    { key: 'team_def_3pa_pg', label: 'Opp 3PA/G', higherBetter: false },
+    { key: 'team_def_3pt_pct', label: 'Opp 3PT %', higherBetter: false },
+    { key: 'team_def_3pa_per_poss', label: 'Opp 3PA/Poss', higherBetter: false },
+    { key: 'team_def_2pa_pg', label: 'Opp 2PA/G', higherBetter: false },
+    { key: 'team_def_2pt_pct', label: 'Opp 2PT %', higherBetter: false },
+    { key: 'team_def_2pa_per_poss', label: 'Opp 2PA/Poss', higherBetter: false },
+    { key: 'team_def_fta_pg', label: 'Opp FTA/G', higherBetter: false },
+    { key: 'team_def_ft_pct', label: 'Opp FT %', higherBetter: false },
+    { key: 'team_def_fta_per_poss', label: 'Opp FTA/Poss', higherBetter: false },
+    { key: 'team_dreb_pg', label: 'DREB/G', higherBetter: true },
+    { key: 'team_dreb_per_poss', label: 'DREB/Poss', higherBetter: true },
+    { key: 'team_forced_to_pg', label: 'Forced TO/G', higherBetter: true },
+    { key: 'team_forced_to_per_poss', label: 'Forced TO/Poss', higherBetter: true },
+  ]},
 ]
+
+// Flat list for backward compat
+const MATCHUP_STATS = MATCHUP_STAT_GROUPS.flatMap(g => g.stats)
 
 // Default pairing: team offensive stat → opponent's corresponding defensive stat
 const STAT_VS_DEFAULT: Record<string, string> = {
@@ -329,69 +364,73 @@ function MatchupTable({ gameId, onStatClick }: { gameId: string; onStatClick?: (
         </tr>
       </thead>
       <tbody>
-        {MATCHUP_STATS.map(({ key, label, higherBetter }) => {
-          const aVal = away[key]
-          const hVal = home[key]
-          const aNum = typeof aVal === 'number' ? aVal : null
-          const hNum = typeof hVal === 'number' ? hVal : null
-
-          let aClass = ''
-          let hClass = ''
-          if (aNum != null && hNum != null && aNum !== hNum) {
-            const aBetter = higherBetter ? aNum > hNum : aNum < hNum
-            aClass = aBetter ? 'stat-better' : 'stat-worse'
-            hClass = aBetter ? 'stat-worse' : 'stat-better'
-          }
-
-          const fmt = (v: any) => {
-            if (v == null) return '-'
-            if (key.includes('pct') && typeof v === 'number' && v <= 1) return `${(v * 100).toFixed(1)}%`
-            if (key.includes('pct') && typeof v === 'number') return `${v.toFixed(1)}%`
-            if (typeof v === 'number') return v.toFixed(1)
-            return String(v)
-          }
-
-          const clickable = onStatClick ? ' stat-clickable' : ''
-
-          const aRank = awayRanks[key]
-          const hRank = homeRanks[key]
-
-          const rankClickable = onStatClick && aRank != null ? ' stat-clickable' : ''
-
-          return (
-            <tr key={key}>
-              <td
-                className={'mu-rank' + rankClickable}
-                onClick={() => aRank != null && handleRankClick(key, aRank, label, 'away')}
-                title={onStatClick && aRank != null ? `Click to add ${label} Rank filter` : undefined}
-              >
-                {aRank != null ? `#${aRank}` : ''}
-              </td>
-              <td
-                className={'mu-val ' + aClass + clickable}
-                onClick={() => handleStatClick(key, aVal, higherBetter, label, 'away')}
-                title={onStatClick && aVal != null ? `Click to add ${label} filter` : undefined}
-              >
-                {fmt(aVal)}
-              </td>
-              <td className="mu-label">{label}</td>
-              <td
-                className={'mu-val ' + hClass + clickable}
-                onClick={() => handleStatClick(key, hVal, higherBetter, label, 'home')}
-                title={onStatClick && hVal != null ? `Click to add ${label} filter` : undefined}
-              >
-                {fmt(hVal)}
-              </td>
-              <td
-                className={'mu-rank' + (onStatClick && hRank != null ? ' stat-clickable' : '')}
-                onClick={() => hRank != null && handleRankClick(key, hRank, label, 'home')}
-                title={onStatClick && hRank != null ? `Click to add ${label} Rank filter` : undefined}
-              >
-                {hRank != null ? `#${hRank}` : ''}
-              </td>
+        {MATCHUP_STAT_GROUPS.map(({ section, stats }) => (
+          <Fragment key={section}>
+            <tr className="mu-section-row">
+              <td colSpan={5} className="mu-section">{section}</td>
             </tr>
-          )
-        })}
+            {stats.map(({ key, label, higherBetter }) => {
+              const aVal = away[key]
+              const hVal = home[key]
+              const aNum = typeof aVal === 'number' ? aVal : null
+              const hNum = typeof hVal === 'number' ? hVal : null
+
+              let aClass = ''
+              let hClass = ''
+              if (aNum != null && hNum != null && aNum !== hNum) {
+                const aBetter = higherBetter ? aNum > hNum : aNum < hNum
+                aClass = aBetter ? 'stat-better' : 'stat-worse'
+                hClass = aBetter ? 'stat-worse' : 'stat-better'
+              }
+
+              const fmt = (v: any) => {
+                if (v == null) return '-'
+                if (key.includes('pct') && typeof v === 'number' && v <= 1) return `${(v * 100).toFixed(1)}%`
+                if (key.includes('pct') && typeof v === 'number') return `${v.toFixed(1)}%`
+                if (typeof v === 'number') return v.toFixed(1)
+                return String(v)
+              }
+
+              const clickable = onStatClick ? ' stat-clickable' : ''
+              const aRank = awayRanks[key]
+              const hRank = homeRanks[key]
+
+              return (
+                <tr key={key}>
+                  <td
+                    className={'mu-rank' + (onStatClick && aRank != null ? ' stat-clickable' : '')}
+                    onClick={() => aRank != null && handleRankClick(key, aRank, label, 'away')}
+                    title={onStatClick && aRank != null ? `Click to add ${label} Rank filter` : undefined}
+                  >
+                    {aRank != null ? `#${aRank}` : ''}
+                  </td>
+                  <td
+                    className={'mu-val ' + aClass + clickable}
+                    onClick={() => handleStatClick(key, aVal, higherBetter, label, 'away')}
+                    title={onStatClick && aVal != null ? `Click to add ${label} filter` : undefined}
+                  >
+                    {fmt(aVal)}
+                  </td>
+                  <td className="mu-label">{label}</td>
+                  <td
+                    className={'mu-val ' + hClass + clickable}
+                    onClick={() => handleStatClick(key, hVal, higherBetter, label, 'home')}
+                    title={onStatClick && hVal != null ? `Click to add ${label} filter` : undefined}
+                  >
+                    {fmt(hVal)}
+                  </td>
+                  <td
+                    className={'mu-rank' + (onStatClick && hRank != null ? ' stat-clickable' : '')}
+                    onClick={() => hRank != null && handleRankClick(key, hRank, label, 'home')}
+                    title={onStatClick && hRank != null ? `Click to add ${label} Rank filter` : undefined}
+                  >
+                    {hRank != null ? `#${hRank}` : ''}
+                  </td>
+                </tr>
+              )
+            })}
+          </Fragment>
+        ))}
       </tbody>
     </table>
   )
@@ -416,8 +455,7 @@ function GameBacktest({ game }: { game: Game }) {
   }, [])
 
   const addStatFilter = (stat: string, op: string, value: string, _label: string, compare_col?: string) => {
-    // Don't add duplicate stat filters
-    const newFilter: Filter = { stat, op, value, compare_col }
+    const newFilter: Filter = { stat, op, value, compare_col: compare_col || '', compare_mode: compare_col ? 'stat' as const : 'value' as const, location: 'all', conference: 'all', compare_location: 'all', compare_conference: 'all' }
     if (filters.some(f => f.stat === stat)) {
       setFilters(filters.map(f => f.stat === stat ? newFilter : f))
     } else {
@@ -433,14 +471,23 @@ function GameBacktest({ game }: { game: Game }) {
     setFilters(next)
   }
 
-  const addFilter = () => setFilters([...filters, { stat: '', op: '>', value: '' }])
+  const addFilter = () => setFilters([...filters, { stat: '', location: 'all', conference: 'all', op: '>', compare_mode: 'stat' as const, value: '0', compare_col: '', compare_location: 'all', compare_conference: 'all' }])
 
   const runBacktest = () => {
     setLoading(true)
-    const validFilters = filters.filter(f => f.stat && f.value)
+    const validFilters = filters.filter(f => f.stat && (f.compare_mode === 'stat' ? f.compare_col : f.value))
     axios.post(`${API_BASE}/api/backtest`, {
       team: team || null,
-      filters: validFilters,
+      filters: validFilters.map(f => ({
+        stat: f.stat,
+        op: f.op,
+        value: f.value,
+        compare_col: f.compare_mode === 'stat' && f.compare_col ? f.compare_col : undefined,
+        location: f.location || 'all',
+        conference: f.conference || 'all',
+        compare_location: f.compare_mode === 'stat' ? (f.compare_location || 'all') : undefined,
+        compare_conference: f.compare_mode === 'stat' ? (f.compare_conference || 'all') : undefined,
+      })),
       name: team ? `${team} — custom` : 'Both teams — custom',
       bet_type: betType,
     })
@@ -487,22 +534,9 @@ function GameBacktest({ game }: { game: Game }) {
         {filters.length > 0 && (
           <div className="game-bt-filters">
             {filters.map((f, i) => {
-              const isSideFilter = ['is_favorite', 'is_underdog', 'is_home', 'is_away', 'is_neutral', 'is_conference'].includes(f.stat)
-              return (
-              <div key={i} className="filter-row">
-                <select value={f.stat} onChange={e => {
-                  const next = [...filters]
-                  const newStat = e.target.value
-                  const isSide = ['is_favorite', 'is_underdog', 'is_home', 'is_away', 'is_neutral', 'is_conference'].includes(newStat)
-                  if (isSide) {
-                    next[i] = { ...next[i], stat: newStat, op: '==', value: '1', compare_col: undefined }
-                  } else {
-                    next[i] = { ...next[i], stat: newStat }
-                    const pair = STAT_VS_PAIRS[newStat]
-                    if (pair && next[i].compare_col) next[i].compare_col = pair
-                  }
-                  setFilters(next)
-                }}>
+              const isBinaryFilter = ['is_favorite', 'is_underdog'].includes(f.stat)
+              const statSelect = (val: string, onChange: (v: string) => void) => (
+                <select value={val} onChange={e => onChange(e.target.value)}>
                   <option value="">-- stat --</option>
                   {Object.entries(columns).map(([group, cols]) => (
                     <optgroup key={group} label={group}>
@@ -510,59 +544,78 @@ function GameBacktest({ game }: { game: Game }) {
                     </optgroup>
                   ))}
                 </select>
-                {isSideFilter ? (
-                  <span className="vs-label" style={{ padding: '0 8px' }}>= Yes</span>
-                ) : (
-                  <>
-                    <select className="op" value={f.op} onChange={e => updateFilter(i, 'op', e.target.value)}>
-                      <option value=">">{'>'}</option>
-                      <option value=">=">{'>='}</option>
-                      <option value="<">{'<'}</option>
-                      <option value="<=">{'<='}</option>
-                      <option value="==">{'=='}</option>
-                      <option value="!=">{'!='}</option>
-                    </select>
-                    {f.compare_col ? (
-                      <>
-                        <VsCompareSelect value={f.compare_col!} onChange={v => {
-                          const next = [...filters]
-                          next[i] = { ...next[i], compare_col: v }
-                          setFilters(next)
-                        }} />
-                        <span className="vs-label">+</span>
-                        <input
-                          value={f.value}
-                          onChange={e => updateFilter(i, 'value', e.target.value)}
-                          placeholder="diff"
-                          title="Minimum differential (0 = just beat it)"
-                          onKeyDown={e => e.key === 'Enter' && runBacktest()}
-                          style={{ width: 40 }}
-                        />
-                        <button className="btn btn-sm" title="Switch to fixed value" onClick={() => {
-                          const next = [...filters]
-                          next[i] = { ...next[i], compare_col: undefined, value: '' }
-                          setFilters(next)
-                        }}>val</button>
-                      </>
-                    ) : (
-                      <>
-                        <input
-                          value={f.value}
-                          onChange={e => updateFilter(i, 'value', e.target.value)}
-                          placeholder="value"
-                          onKeyDown={e => e.key === 'Enter' && runBacktest()}
-                        />
-                        <button className="btn btn-sm" title="Compare vs opponent stat" onClick={() => {
-                          const pair = STAT_VS_PAIRS[f.stat] || f.stat.replace('team_', 'opp_')
-                          const next = [...filters]
-                          next[i] = { ...next[i], compare_col: pair, value: '0' }
-                          setFilters(next)
-                        }}>vs</button>
-                      </>
-                    )}
-                  </>
+              )
+              const locSelect = (val: string, field: keyof Filter) => (
+                <select className="loc-select" value={val} onChange={e => updateFilter(i, field, e.target.value)}>
+                  <option value="all">All Games</option>
+                  <option value="home">Home</option>
+                  <option value="away">Away</option>
+                  <option value="neutral">Neutral</option>
+                </select>
+              )
+              const confSelect = (val: string, field: keyof Filter) => (
+                <select className="conf-select" value={val} onChange={e => updateFilter(i, field, e.target.value)}>
+                  <option value="all">All Games</option>
+                  <option value="conference">Conference</option>
+                  <option value="nonconference">Non-Conference</option>
+                </select>
+              )
+              return (
+              <div key={i} className="filter-group">
+                <div className="filter-rows">
+                {isBinaryFilter && (
+                <div className="filter-row">
+                  {statSelect(f.stat, v => {
+                    const next = [...filters]; next[i] = { ...next[i], stat: v, op: '==', value: '1', compare_mode: 'value' as const, compare_col: '' }; setFilters(next)
+                  })}
+                  {locSelect(f.location, 'location')}
+                  {confSelect(f.conference, 'conference')}
+                </div>
                 )}
-                <button className="btn btn-sm btn-danger" onClick={() => removeFilter(i)}>x</button>
+                {!isBinaryFilter && f.compare_mode === 'value' && (
+                <>
+                <div className="filter-row">
+                  {statSelect(f.stat, v => { const next = [...filters]; next[i] = { ...next[i], stat: v }; setFilters(next) })}
+                  {locSelect(f.location, 'location')}
+                  {confSelect(f.conference, 'conference')}
+                </div>
+                <div className="filter-row">
+                  <select className="op" value={f.op} onChange={e => updateFilter(i, 'op', e.target.value)}>
+                    <option value=">">{'>'}</option><option value=">=">{'>='}</option><option value="<">{'<'}</option><option value="<=">{'<='}</option>
+                  </select>
+                  <button className="btn btn-sm toggle-btn active" onClick={() => {
+                    const pair = STAT_VS_PAIRS[f.stat] || f.stat.replace('team_', 'opp_') || ''
+                    const next = [...filters]; next[i] = { ...next[i], compare_mode: 'stat' as const, compare_col: pair, value: '0' }; setFilters(next)
+                  }}>Value</button>
+                  <input value={f.value} onChange={e => updateFilter(i, 'value', e.target.value)} placeholder="value" onKeyDown={e => e.key === 'Enter' && runBacktest()} />
+                </div>
+                </>
+                )}
+                {!isBinaryFilter && f.compare_mode === 'stat' && (
+                <>
+                <div className="filter-row">
+                  {statSelect(f.stat, v => { const next = [...filters]; next[i] = { ...next[i], stat: v }; setFilters(next) })}
+                  {locSelect(f.location, 'location')}
+                  {confSelect(f.conference, 'conference')}
+                </div>
+                <div className="filter-row">
+                  <select className="op" value={f.op} onChange={e => updateFilter(i, 'op', e.target.value)}>
+                    <option value=">">{'>'}</option><option value=">=">{'>='}</option><option value="<">{'<'}</option><option value="<=">{'<='}</option>
+                  </select>
+                  <button className="btn btn-sm toggle-btn active" onClick={() => {
+                    const next = [...filters]; next[i] = { ...next[i], compare_mode: 'value' as const, compare_col: '', value: '' }; setFilters(next)
+                  }}>Stat</button>
+                  <input value={f.value} onChange={e => updateFilter(i, 'value', e.target.value)} placeholder="± margin" className="margin-input" onKeyDown={e => e.key === 'Enter' && runBacktest()} />
+                </div>
+                <div className="filter-row">
+                  {statSelect(f.compare_col, v => { const next = [...filters]; next[i] = { ...next[i], compare_col: v }; setFilters(next) })}
+                  {locSelect(f.compare_location, 'compare_location')}
+                  {confSelect(f.compare_conference, 'compare_conference')}
+                </div>
+                </>
+                )}
+                </div>
+                <button className="btn filter-remove" onClick={() => removeFilter(i)}>x</button>
               </div>
               )
             })}
@@ -1317,9 +1370,11 @@ function PnLChart({ data }: { data: PnlPoint[] }) {
 
 function BacktestPage() {
   const [columns, setColumns] = useState<ColumnGroups>({})
-  const [filters, setFilters] = useState<Filter[]>([{ stat: '', op: '>', value: '' }])
+  const [filters, setFilters] = useState<Filter[]>([{ stat: '', location: 'all', conference: 'all', op: '>', compare_mode: 'stat', value: '0', compare_col: '', compare_location: 'all', compare_conference: 'all' }])
   const [team, setTeam] = useState<string>('')
-  const [teams, setTeams] = useState<string[]>([])
+  const [teams, setTeams] = useState<{name: string, conference: string}[]>([])
+  const [teamConference, setTeamConference] = useState<string>('all')
+  const [confTiers, setConfTiers] = useState<{ [tier: string]: string[] }>({})
   const [result, setResult] = useState<BacktestResult | null>(null)
   const [games, setGames] = useState<BacktestGame[]>([])
   const [pnl, setPnl] = useState<PnlPoint[]>([])
@@ -1333,12 +1388,24 @@ function BacktestPage() {
 
   useEffect(() => {
     axios.get(`${API_BASE}/api/columns`).then(r => setColumns(r.data)).catch(() => {})
-    axios.get(`${API_BASE}/api/teams`).then(r => {
-      setTeams(r.data.map((t: any) => t.name).sort())
+    axios.get(`${API_BASE}/api/teams`, { params: { scope: 'all' } }).then(r => {
+      setTeams(r.data.map((t: any) => ({ name: t.name, conference: t.conference || '' })).sort((a: any, b: any) => a.name.localeCompare(b.name)))
     }).catch(() => {})
+    axios.get(`${API_BASE}/api/conferences`).then(r => setConfTiers(r.data.tiers || {})).catch(() => {})
   }, [])
 
-  const addFilter = () => setFilters([...filters, { stat: '', op: '>', value: '' }])
+  const filteredTeams = teams.filter(t => {
+    if (teamConference === 'all') return true
+    if (teamConference in confTiers || confTiers[teamConference]) return (confTiers[teamConference] ?? []).includes(t.conference)
+    return t.conference === teamConference
+  })
+
+  const btTierKeys = ['power5', 'high_major', 'mid_major', 'low_major'] as const
+  const btTierLabels: { [k: string]: string } = {
+    power5: 'Power 5', high_major: 'High Major', mid_major: 'Mid Major', low_major: 'Low Major',
+  }
+
+  const addFilter = () => setFilters([...filters, { stat: '', location: 'all', conference: 'all', op: '>', compare_mode: 'stat', value: '0', compare_col: '', compare_location: 'all', compare_conference: 'all' }])
   const removeFilter = (i: number) => setFilters(filters.filter((_, idx) => idx !== i))
   const updateFilter = (i: number, field: keyof Filter, value: string) => {
     const next = [...filters]
@@ -1348,10 +1415,20 @@ function BacktestPage() {
 
   const runBacktest = () => {
     setLoading(true)
-    const validFilters = filters.filter(f => f.stat && f.value)
+    const validFilters = filters.filter(f => f.stat && (f.compare_mode === 'stat' ? f.compare_col : f.value))
     axios.post(`${API_BASE}/api/backtest`, {
       team: team || null,
-      filters: validFilters,
+      team_conference: teamConference || 'all',
+      filters: validFilters.map(f => ({
+        stat: f.stat,
+        op: f.op,
+        value: f.value,
+        compare_col: f.compare_mode === 'stat' && f.compare_col ? f.compare_col : undefined,
+        location: f.location || 'all',
+        conference: f.conference || 'all',
+        compare_location: f.compare_mode === 'stat' ? (f.compare_location || 'all') : undefined,
+        compare_conference: f.compare_mode === 'stat' ? (f.compare_conference || 'all') : undefined,
+      })),
       name: team ? `Custom: ${team}` : 'Custom backtest',
       bet_type: betType,
     })
@@ -1430,90 +1507,187 @@ function BacktestPage() {
   return (
     <div className="backtest-container">
       <div className="backtest-sidebar">
+        <div className="section-header">Conference</div>
+        <select className="team-select" value={teamConference} onChange={e => { setTeamConference(e.target.value); setTeam('') }}>
+          <option value="all">All Conferences</option>
+          {btTierKeys.map(tier => (
+            <optgroup key={tier} label={btTierLabels[tier]}>
+              <option value={tier}>All {btTierLabels[tier]}</option>
+              {(confTiers[tier] ?? []).map(c => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+
         <div className="section-header">Team</div>
         <select className="team-select" value={team} onChange={e => setTeam(e.target.value)}>
           <option value="">All Teams</option>
-          {teams.map(t => <option key={t} value={t}>{t}</option>)}
+          {filteredTeams.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
         </select>
 
         <div className="section-header">Filters</div>
         {filters.map((f, i) => {
-          const isSideFilter = ['is_favorite', 'is_underdog', 'is_home', 'is_away', 'is_neutral', 'is_conference'].includes(f.stat)
+          const isBinaryFilter = ['is_favorite', 'is_underdog'].includes(f.stat)
           return (
-          <div key={i} className="filter-row">
-            <select value={f.stat} onChange={e => {
-              const next = [...filters]
-              const newStat = e.target.value
-              const isSide = ['is_favorite', 'is_underdog', 'is_home', 'is_away', 'is_neutral', 'is_conference'].includes(newStat)
-              if (isSide) {
-                next[i] = { ...next[i], stat: newStat, op: '==', value: '1', compare_col: undefined }
-              } else {
-                next[i] = { ...next[i], stat: newStat }
-                const pair = STAT_VS_PAIRS[newStat]
-                if (pair && next[i].compare_col) next[i].compare_col = pair
-              }
-              setFilters(next)
-            }}>
-              <option value="">-- stat --</option>
-              {Object.entries(columns).map(([group, cols]) => (
-                <optgroup key={group} label={group}>
-                  {cols.map(c => <option key={c.col} value={c.col}>{c.label}</option>)}
-                </optgroup>
-              ))}
-            </select>
-            {isSideFilter ? (
-              <span className="vs-label" style={{ padding: '0 8px' }}>= Yes</span>
-            ) : (
-              <>
-                <select className="op" value={f.op} onChange={e => updateFilter(i, 'op', e.target.value)}>
-                  <option value=">">{'>'}</option>
-                  <option value=">=">{'>='}</option>
-                  <option value="<">{'<'}</option>
-                  <option value="<=">{'<='}</option>
-                  <option value="==">{'=='}</option>
-                  <option value="!=">{'!='}</option>
-                </select>
-                {f.compare_col ? (
-                  <>
-                    <VsCompareSelect value={f.compare_col!} onChange={v => {
-                      const next = [...filters]
-                      next[i] = { ...next[i], compare_col: v }
-                      setFilters(next)
-                    }} />
-                    <span className="vs-label">+</span>
-                    <input
-                      value={f.value}
-                      onChange={e => updateFilter(i, 'value', e.target.value)}
-                      placeholder="diff"
-                      title="Minimum differential"
-                      onKeyDown={e => e.key === 'Enter' && runBacktest()}
-                      style={{ width: 40 }}
-                    />
-                    <button className="btn btn-sm" title="Switch to fixed value" onClick={() => {
-                      const next = [...filters]
-                      next[i] = { ...next[i], compare_col: undefined, value: '' }
-                      setFilters(next)
-                    }}>val</button>
-                  </>
-                ) : (
-                  <>
-                    <input
-                      value={f.value}
-                      onChange={e => updateFilter(i, 'value', e.target.value)}
-                      placeholder="value"
-                      onKeyDown={e => e.key === 'Enter' && runBacktest()}
-                    />
-                    <button className="btn btn-sm" title="Compare vs opponent stat" onClick={() => {
-                      const pair = STAT_VS_PAIRS[f.stat] || f.stat.replace('team_', 'opp_')
-                      const next = [...filters]
-                      next[i] = { ...next[i], compare_col: pair, value: '0' }
-                      setFilters(next)
-                    }}>vs</button>
-                  </>
-                )}
-              </>
+          <div key={i} className="filter-group">
+            <div className="filter-rows">
+            {/* Boolean: 1 row — Stat + Location + Conference */}
+            {isBinaryFilter && (
+            <div className="filter-row">
+              <select className="stat-select" value={f.stat} onChange={e => {
+                const next = [...filters]
+                next[i] = { ...next[i], stat: e.target.value, op: '==', value: '1', compare_mode: 'value' as const, compare_col: '' }
+                setFilters(next)
+              }}>
+                <option value="">-- stat --</option>
+                {Object.entries(columns).map(([group, cols]) => (
+                  <optgroup key={group} label={group}>
+                    {cols.map(c => <option key={c.col} value={c.col}>{c.label}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+              <select className="loc-select" value={f.location} onChange={e => updateFilter(i, 'location', e.target.value)}>
+                <option value="all">All Games</option>
+                <option value="home">Home</option>
+                <option value="away">Away</option>
+                <option value="neutral">Neutral</option>
+              </select>
+              <select className="conf-select" value={f.conference} onChange={e => updateFilter(i, 'conference', e.target.value)}>
+                <option value="all">All Games</option>
+                <option value="conference">Conference</option>
+                <option value="nonconference">Non-Conference</option>
+              </select>
+            </div>
             )}
-            <button className="btn btn-sm btn-danger" onClick={() => removeFilter(i)}>x</button>
+            {/* Value mode: Row 1 — Stat + Location + Conf, Row 2 — Op + Toggle + Value */}
+            {!isBinaryFilter && f.compare_mode === 'value' && (
+            <>
+            <div className="filter-row">
+              <select className="stat-select" value={f.stat} onChange={e => {
+                const next = [...filters]
+                next[i] = { ...next[i], stat: e.target.value }
+                setFilters(next)
+              }}>
+                <option value="">-- stat --</option>
+                {Object.entries(columns).map(([group, cols]) => (
+                  <optgroup key={group} label={group}>
+                    {cols.map(c => <option key={c.col} value={c.col}>{c.label}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+              <select className="loc-select" value={f.location} onChange={e => updateFilter(i, 'location', e.target.value)}>
+                <option value="all">All Games</option>
+                <option value="home">Home</option>
+                <option value="away">Away</option>
+                <option value="neutral">Neutral</option>
+              </select>
+              <select className="conf-select" value={f.conference} onChange={e => updateFilter(i, 'conference', e.target.value)}>
+                <option value="all">All Games</option>
+                <option value="conference">Conference</option>
+                <option value="nonconference">Non-Conference</option>
+              </select>
+            </div>
+            <div className="filter-row">
+              <select className="op" value={f.op} onChange={e => updateFilter(i, 'op', e.target.value)}>
+                <option value=">">{'>'}</option>
+                <option value=">=">{'>='}</option>
+                <option value="<">{'<'}</option>
+                <option value="<=">{'<='}</option>
+              </select>
+              <button className="btn btn-sm toggle-btn active" onClick={() => {
+                const next = [...filters]
+                const pair = STAT_VS_PAIRS[f.stat] || f.stat.replace('team_', 'opp_') || ''
+                next[i] = { ...next[i], compare_mode: 'stat' as const, compare_col: pair, value: '0' }
+                setFilters(next)
+              }}>Value</button>
+              <input
+                value={f.value}
+                onChange={e => updateFilter(i, 'value', e.target.value)}
+                placeholder="value"
+                onKeyDown={e => e.key === 'Enter' && runBacktest()}
+              />
+            </div>
+            </>
+            )}
+            {/* Stat mode: Row 1 — Stat + Location + Conf, Row 2 — Op + Toggle + Margin, Row 3 — Compare Stat + Location + Conf */}
+            {!isBinaryFilter && f.compare_mode === 'stat' && (
+            <>
+            <div className="filter-row">
+              <select className="stat-select" value={f.stat} onChange={e => {
+                const next = [...filters]
+                next[i] = { ...next[i], stat: e.target.value }
+                setFilters(next)
+              }}>
+                <option value="">-- stat --</option>
+                {Object.entries(columns).map(([group, cols]) => (
+                  <optgroup key={group} label={group}>
+                    {cols.map(c => <option key={c.col} value={c.col}>{c.label}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+              <select className="loc-select" value={f.location} onChange={e => updateFilter(i, 'location', e.target.value)}>
+                <option value="all">All Games</option>
+                <option value="home">Home</option>
+                <option value="away">Away</option>
+                <option value="neutral">Neutral</option>
+              </select>
+              <select className="conf-select" value={f.conference} onChange={e => updateFilter(i, 'conference', e.target.value)}>
+                <option value="all">All Games</option>
+                <option value="conference">Conference</option>
+                <option value="nonconference">Non-Conference</option>
+              </select>
+            </div>
+            <div className="filter-row">
+              <select className="op" value={f.op} onChange={e => updateFilter(i, 'op', e.target.value)}>
+                <option value=">">{'>'}</option>
+                <option value=">=">{'>='}</option>
+                <option value="<">{'<'}</option>
+                <option value="<=">{'<='}</option>
+              </select>
+              <button className="btn btn-sm toggle-btn active" onClick={() => {
+                const next = [...filters]
+                next[i] = { ...next[i], compare_mode: 'value' as const, compare_col: '', value: '' }
+                setFilters(next)
+              }}>Stat</button>
+              <input
+                value={f.value}
+                onChange={e => updateFilter(i, 'value', e.target.value)}
+                placeholder="± margin"
+                title="Margin (differential)"
+                onKeyDown={e => e.key === 'Enter' && runBacktest()}
+                className="margin-input"
+              />
+            </div>
+            <div className="filter-row">
+              <select className="compare-stat" value={f.compare_col} onChange={e => {
+                const next = [...filters]
+                next[i] = { ...next[i], compare_col: e.target.value }
+                setFilters(next)
+              }}>
+                <option value="">-- stat --</option>
+                {Object.entries(columns).map(([group, cols]) => (
+                  <optgroup key={group} label={group}>
+                    {cols.map(c => <option key={c.col} value={c.col}>{c.label}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+              <select className="loc-select" value={f.compare_location} onChange={e => updateFilter(i, 'compare_location', e.target.value)}>
+                <option value="all">All Games</option>
+                <option value="home">Home</option>
+                <option value="away">Away</option>
+                <option value="neutral">Neutral</option>
+              </select>
+              <select className="conf-select" value={f.compare_conference} onChange={e => updateFilter(i, 'compare_conference', e.target.value)}>
+                <option value="all">All Games</option>
+                <option value="conference">Conference</option>
+                <option value="nonconference">Non-Conference</option>
+              </select>
+            </div>
+            </>
+            )}
+            </div>
+            <button className="btn filter-remove" onClick={() => removeFilter(i)}>x</button>
           </div>
           )
         })}

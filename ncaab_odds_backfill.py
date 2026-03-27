@@ -253,7 +253,7 @@ def main():
     # Save remaining rows
     if batch_rows:
         print(f"  [{_now_str()}] Saving final batch ({len(batch_rows):,} rows)...")
-        total_in_file = append_to_history(batch_rows)
+        total_in_file = append_to_staging(batch_rows)
         print(f"  [{_now_str()}] Parquet now: {total_in_file:,} total rows")
 
     print()
