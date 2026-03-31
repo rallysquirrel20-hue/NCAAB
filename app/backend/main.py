@@ -188,9 +188,8 @@ def _lookup_odds_for_game(home_canonical: str, away_canonical: str,
     # Filter by commence_time to isolate the correct game instance.
     # Only keep rows whose commence_time is within ±2 days of the game date.
     if "commence_time" in game_df.columns:
-        commence_dates = pd.to_datetime(game_df["commence_time"], errors="coerce").dt.strftime("%Y-%m-%d")
-        game_date_dt = pd.Timestamp(commence_date)
-        commence_dt = pd.to_datetime(game_df["commence_time"], errors="coerce")
+        game_date_dt = pd.Timestamp(commence_date, tz="UTC")
+        commence_dt = pd.to_datetime(game_df["commence_time"], errors="coerce", utc=True)
         date_mask = (commence_dt >= game_date_dt - pd.Timedelta(days=2)) & \
                     (commence_dt <= game_date_dt + pd.Timedelta(days=2))
         filtered = game_df[date_mask]
@@ -1306,8 +1305,8 @@ def get_game_odds(game_id: str):
                     game_date = g.get("game_date", g.get("commence_time", "")[:10])
                     break
         if game_date:
-            game_date_dt = pd.Timestamp(game_date)
-            commence_dt = pd.to_datetime(matched["commence_time"], errors="coerce")
+            game_date_dt = pd.Timestamp(game_date, tz="UTC")
+            commence_dt = pd.to_datetime(matched["commence_time"], errors="coerce", utc=True)
             date_mask = (commence_dt >= game_date_dt - pd.Timedelta(days=2)) & \
                         (commence_dt <= game_date_dt + pd.Timedelta(days=2))
             filtered = matched[date_mask]
