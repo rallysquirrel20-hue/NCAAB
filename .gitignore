@@ -6,3 +6,5 @@ ncaab_today.json
 node_modules/
 dist/
 app/backend/venv/
+ncaab_odds_history.parquet
+*.log

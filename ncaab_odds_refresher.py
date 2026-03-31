@@ -1,7 +1,11 @@
 """
 NCAAB Odds History Refresher
 ==============================
-Snapshots current live odds and appends to ncaab_odds_history.parquet.
+Snapshots current live odds and appends to per-day parquet files in odds_history/.
+
+Per-day files prevent git merge conflicts when syncing between multiple PCs.
+Before each API call, checks if a recent snapshot already exists to avoid
+duplicate calls when multiple PCs are running.
 
 Usage:
     python ncaab_odds_refresher.py              # Run once
@@ -24,7 +28,13 @@ load_dotenv(SCRIPT_DIR / ".env", override=True)
 
 THE_ODDS_API_KEY = os.getenv("THE_ODDS_API_KEY")
 ODDS_BASE = "https://api.the-odds-api.com"
-HISTORY_FILE = SCRIPT_DIR / "ncaab_odds_history.parquet"
+HISTORY_DIR = SCRIPT_DIR / "odds_history"
+# Legacy single-file path (still read by backend for migration)
+LEGACY_HISTORY_FILE = SCRIPT_DIR / "ncaab_odds_history.parquet"
+
+# Minimum minutes between snapshots — skip API call if a snapshot exists
+# within this window (prevents duplicate calls across PCs)
+MIN_SNAPSHOT_GAP_MINUTES = 10
 
 HISTORY_COLUMNS = [
     "snapshot_time", "game_id", "commence_time",
@@ -97,27 +107,59 @@ def fetch_live_odds() -> list[dict] | None:
     return rows
 
 
-def append_to_history(rows: list[dict]) -> None:
-    """Append new odds rows to the history parquet."""
-    new_df = pd.DataFrame(rows, columns=HISTORY_COLUMNS)
+def _today_file() -> Path:
+    """Return the per-day parquet path for today."""
+    return HISTORY_DIR / f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.parquet"
 
-    if HISTORY_FILE.exists():
+
+def _has_recent_snapshot(gap_minutes: int = MIN_SNAPSHOT_GAP_MINUTES) -> bool:
+    """Check if today's file already has a snapshot within the last gap_minutes."""
+    day_file = _today_file()
+    if not day_file.exists():
+        return False
+    try:
+        df = pd.read_parquet(day_file)
+        if df.empty:
+            return False
+        latest = pd.to_datetime(df["snapshot_time"]).max()
+        now = pd.Timestamp.now(tz="UTC")
+        if latest.tzinfo is None:
+            latest = latest.tz_localize("UTC")
+        age = (now - latest).total_seconds() / 60
+        if age < gap_minutes:
+            print(f"  [{_now_str()}] Recent snapshot exists ({age:.0f}m ago, "
+                  f"threshold {gap_minutes}m). Skipping API call.")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def append_to_history(rows: list[dict]) -> None:
+    """Append new odds rows to today's per-day parquet file."""
+    HISTORY_DIR.mkdir(exist_ok=True)
+    new_df = pd.DataFrame(rows, columns=HISTORY_COLUMNS)
+    day_file = _today_file()
+
+    if day_file.exists():
         try:
-            existing = pd.read_parquet(HISTORY_FILE)
+            existing = pd.read_parquet(day_file)
             combined = pd.concat([existing, new_df], ignore_index=True)
-            combined.to_parquet(HISTORY_FILE, index=False, engine="pyarrow")
-            print(f"  [{_now_str()}] History: {len(combined)} total rows (+{len(rows)} new)")
+            combined.to_parquet(day_file, index=False, engine="pyarrow")
+            print(f"  [{_now_str()}] {day_file.name}: {len(combined)} rows (+{len(rows)} new)")
         except Exception as e:
-            print(f"  [{_now_str()}] History write error: {e}. Starting fresh.")
-            new_df.to_parquet(HISTORY_FILE, index=False, engine="pyarrow")
+            print(f"  [{_now_str()}] Write error: {e}. Starting fresh for today.")
+            new_df.to_parquet(day_file, index=False, engine="pyarrow")
     else:
-        new_df.to_parquet(HISTORY_FILE, index=False, engine="pyarrow")
-        print(f"  [{_now_str()}] History: Created new file with {len(rows)} rows")
+        new_df.to_parquet(day_file, index=False, engine="pyarrow")
+        print(f"  [{_now_str()}] {day_file.name}: Created with {len(rows)} rows")
 
 
 def run_refresh():
-    """Run a single odds snapshot."""
+    """Run a single odds snapshot (skips if a recent snapshot exists)."""
     print(f"[{_now_str()}] Snapshotting odds...")
+    if _has_recent_snapshot():
+        return
     rows = fetch_live_odds()
     if rows:
         append_to_history(rows)

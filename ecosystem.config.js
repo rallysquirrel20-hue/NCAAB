@@ -34,5 +34,12 @@ module.exports = {
       script: "ncaab_schedule_refresher.py",
       args: "--loop --interval 300",
     },
+    {
+      name: "ncaab-daily",
+      cwd: __dirname,
+      interpreter: path.join(__dirname, "app", "backend", "venv", "Scripts", "python.exe"),
+      script: "ncaab_daily_builder.py",
+      args: "--loop --interval 21600",
+    },
   ],
 };

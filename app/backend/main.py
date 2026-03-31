@@ -40,7 +40,8 @@ from ncaab_config import TEAMS, CONFERENCE_MAP, ODDS_NAME_MAP
 
 # Data files
 GAME_LOGS_FILE = NCAAB_DIR / "ncaab_game_logs.parquet"
-ODDS_HISTORY_FILE = NCAAB_DIR / "ncaab_odds_history.parquet"
+ODDS_HISTORY_FILE = NCAAB_DIR / "ncaab_odds_history.parquet"  # legacy single file
+ODDS_HISTORY_DIR = NCAAB_DIR / "odds_history"  # per-day files (preferred)
 TODAY_FILE = NCAAB_DIR / "ncaab_today.json"
 
 # D1 conference + team ID caches (built by daily builder)
@@ -129,6 +130,19 @@ def _get_today() -> dict:
 
 
 def _get_odds_history() -> pd.DataFrame:
+    # Read from per-day files in odds_history/ dir (preferred),
+    # falling back to legacy single parquet file
+    if ODDS_HISTORY_DIR.exists():
+        day_files = sorted(ODDS_HISTORY_DIR.glob("*.parquet"))
+        if day_files:
+            latest_mtime = max(f.stat().st_mtime for f in day_files)
+            if _cache["odds_history"] is None or latest_mtime > _cache["odds_history_mtime"]:
+                dfs = [pd.read_parquet(f) for f in day_files]
+                _cache["odds_history"] = pd.concat(dfs, ignore_index=True)
+                _cache["odds_history_mtime"] = latest_mtime
+            return _cache["odds_history"]
+
+    # Fallback: legacy single file only
     if ODDS_HISTORY_FILE.exists():
         mtime = ODDS_HISTORY_FILE.stat().st_mtime
         if _cache["odds_history"] is None or mtime > _cache["odds_history_mtime"]:
@@ -153,6 +167,7 @@ def _lookup_odds_for_game(home_canonical: str, away_canonical: str,
 
     Returns a dict with spread/ml/total for both teams, or None if not found.
     Uses the last pre-game snapshot (or latest available).
+    Filters by commence_time to avoid cross-contamination from rematches.
     """
     odf = _get_odds_history()
     if odf.empty:
@@ -169,6 +184,18 @@ def _lookup_odds_for_game(home_canonical: str, away_canonical: str,
     game_df = odf[mask]
     if game_df.empty:
         return None
+
+    # Filter by commence_time to isolate the correct game instance.
+    # Only keep rows whose commence_time is within ±2 days of the game date.
+    if "commence_time" in game_df.columns:
+        commence_dates = pd.to_datetime(game_df["commence_time"], errors="coerce").dt.strftime("%Y-%m-%d")
+        game_date_dt = pd.Timestamp(commence_date)
+        commence_dt = pd.to_datetime(game_df["commence_time"], errors="coerce")
+        date_mask = (commence_dt >= game_date_dt - pd.Timedelta(days=2)) & \
+                    (commence_dt <= game_date_dt + pd.Timedelta(days=2))
+        filtered = game_df[date_mask]
+        if not filtered.empty:
+            game_df = filtered
 
     # Get the latest snapshot that's on or before the game date + 1 day
     # (pre-game odds, not live in-game odds)
@@ -885,6 +912,8 @@ _RANKED_STATS = {
     # Record
     "team_win_pct": True,
     "team_ats_win_pct": True,
+    "team_ats_margin_wins": True,
+    "team_ats_margin_losses": True,
     "team_sos": True,
 }
 
@@ -953,10 +982,27 @@ def _build_side(r, rankings: dict[str, dict[str, int]] | None = None):
     team_ranks = rankings.get(team_name, {}) if rankings else {}
 
     stat_keys = [
-        "team_win_pct", "team_ppg", "opp_ppg", "team_ats_win_pct",
-        "team_3pt_pct", "team_ft_pct", "team_2pt_pct",
-        "team_pace", "team_sos", "team_oreb_pg", "team_dreb_pg",
-        "team_to_pg", "team_forced_to_pg", "team_def_3pt_pct", "team_def_2pt_pct",
+        # Record
+        "team_win_pct", "team_ats_win_pct",
+        "team_ats_margin_wins", "team_ats_margin_losses",
+        "team_sos",
+        # Offense
+        "team_ppg", "team_pace", "team_ppp",
+        "team_3pa_pg", "team_3pt_pct", "team_3pa_per_poss",
+        "team_2pa_pg", "team_2pt_pct", "team_2pa_per_poss",
+        "team_fta_pg", "team_ft_pct", "team_fta_per_poss",
+        "team_oreb_pg", "team_oreb_per_poss",
+        "team_to_pg", "team_to_per_poss",
+        # Defense
+        "opp_ppg", "team_def_ppg", "team_def_ppp",
+        "team_def_3pa_pg", "team_def_3pt_pct", "team_def_3pa_per_poss",
+        "team_def_2pa_pg", "team_def_2pt_pct", "team_def_2pa_per_poss",
+        "team_def_fta_pg", "team_def_ft_pct", "team_def_fta_per_poss",
+        "team_dreb_pg", "team_dreb_per_poss",
+        "team_forced_to_pg", "team_forced_to_per_poss",
+        # Location splits
+        "team_home_win_pct", "team_away_win_pct",
+        "team_home_ppg", "team_away_ppg",
     ]
     stats: dict[str, Any] = {
         "record": _build_record(r),
@@ -1242,6 +1288,31 @@ def get_game_odds(game_id: str):
     matched = odf[mask]
     if matched.empty:
         return {"game_id": game_id, "home": home_canonical, "away": away_canonical, "timeline": []}
+
+    # Filter by commence_time to isolate the correct game instance
+    # (avoid showing odds from a prior matchup of the same two teams)
+    if "commence_time" in matched.columns:
+        # Find the game date from game logs or today.json
+        game_date = None
+        gdf = _get_game_logs()
+        if not gdf.empty:
+            rows = gdf[gdf["event_id"] == game_id]
+            if not rows.empty:
+                game_date = rows.iloc[0]["date"]
+        if game_date is None:
+            today = _get_today()
+            for g in today.get("games", []):
+                if str(g.get("game_id")) == str(game_id):
+                    game_date = g.get("game_date", g.get("commence_time", "")[:10])
+                    break
+        if game_date:
+            game_date_dt = pd.Timestamp(game_date)
+            commence_dt = pd.to_datetime(matched["commence_time"], errors="coerce")
+            date_mask = (commence_dt >= game_date_dt - pd.Timedelta(days=2)) & \
+                        (commence_dt <= game_date_dt + pd.Timedelta(days=2))
+            filtered = matched[date_mask]
+            if not filtered.empty:
+                matched = filtered
 
     actual_home = matched["home_team"].iloc[0]
     actual_away = matched["away_team"].iloc[0]

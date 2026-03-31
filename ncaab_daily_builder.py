@@ -2304,132 +2304,151 @@ def main():
                         help="Backfill commence_time_utc for all games")
     parser.add_argument("--rebuild-all", action="store_true",
                         help="Re-scan all dates to capture all D1 teams")
+    parser.add_argument("--loop", action="store_true",
+                        help="Run continuously on an interval")
+    parser.add_argument("--interval", type=int, default=21600,
+                        help="Seconds between runs in loop mode (default: 21600 = 6 hours)")
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("  NCAAB Daily Builder -- Season 2025-26 (Full D1)")
-    print("=" * 60)
-    print()
+    def run_once():
+        print("=" * 60)
+        print("  NCAAB Daily Builder -- Season 2025-26 (Full D1)")
+        print("=" * 60)
+        print()
 
-    # Full D1 team directory
-    d1_team_ids = get_all_d1_ids()
-    d1_id_to_name = {tid: name for name, tid in d1_team_ids.items()}
-    d1_conf_by_id = fetch_d1_conference_map()
+        # Full D1 team directory
+        d1_team_ids = get_all_d1_ids()
+        d1_id_to_name = {tid: name for name, tid in d1_team_ids.items()}
+        d1_conf_by_id = fetch_d1_conference_map()
 
-    # Tournament subset (for odds, CSV export, is_tracked flag)
-    tournament_team_ids = get_team_ids()
-    tournament_ids = set(tournament_team_ids.values())
+        # Tournament subset (for odds, CSV export, is_tracked flag)
+        tournament_team_ids = get_team_ids()
+        tournament_ids = set(tournament_team_ids.values())
 
-    df = load_game_logs()
+        df = load_game_logs()
 
-    # Ensure is_tracked is set for existing rows
-    if "is_tracked" not in df.columns:
-        df["is_tracked"] = None
-    if not df.empty:
-        tracked_names = set(TEAMS)
-        df.loc[df["is_tracked"].isna(), "is_tracked"] = (
-            df.loc[df["is_tracked"].isna(), "team"].isin(tracked_names)
+        # Ensure is_tracked is set for existing rows
+        if "is_tracked" not in df.columns:
+            df["is_tracked"] = None
+        if not df.empty:
+            tracked_names = set(TEAMS)
+            df.loc[df["is_tracked"].isna(), "is_tracked"] = (
+                df.loc[df["is_tracked"].isna(), "team"].isin(tracked_names)
+            )
+
+        # --rebuild-all: drop old non-tournament rows (partial mirror/opponent data)
+        # and re-scan from season start to capture all D1 teams
+        if args.rebuild_all:
+            if not df.empty:
+                old_len = len(df)
+                df = df[df["is_tracked"] == True].copy()  # noqa: E712
+                print(f"[{_now_str()}] --rebuild-all: kept {len(df)} tournament rows, "
+                      f"dropped {old_len - len(df)} non-tournament rows")
+
+        # Show existing data summary
+        existing_spreads = df["closing_fg_spread"].notna().sum() if not df.empty else 0
+        existing_boxscore = df["team_fgm"].notna().sum() if not df.empty else 0
+        print(f"[{_now_str()}] Loaded {len(df)} existing rows "
+              f"({existing_spreads} with spreads, {existing_boxscore} with boxscore)")
+
+        # Show what we're about to do
+        flags = []
+        if args.rebuild_all:
+            flags.append("rebuild-all (full D1 re-scan)")
+        if args.backfill_odds:
+            if args.backfill_odds == "all":
+                flags.append("backfill-odds (ALL missing dates)")
+            else:
+                flags.append(f"backfill-odds (date: {args.backfill_odds})")
+        if args.backfill_boxscore:
+            flags.append("backfill-boxscore")
+        if args.backfill_ranks:
+            flags.append("backfill-ranks")
+        if args.backfill_times:
+            flags.append("backfill-times")
+        if flags:
+            print(f"[{_now_str()}] Flags: {', '.join(flags)}")
+        else:
+            print(f"[{_now_str()}] Mode: daily incremental (new dates only)")
+        print()
+
+        # Phase 1: new games (all D1 teams)
+        force_start = SEASON_START if args.rebuild_all else None
+        df, new_dates = phase1_fetch_games(
+            df, d1_team_ids, tournament_ids, d1_id_to_name, d1_conf_by_id,
+            force_start=force_start,
         )
 
-    # --rebuild-all: drop old non-tournament rows (partial mirror/opponent data)
-    # and re-scan from season start to capture all D1 teams
-    if args.rebuild_all:
-        if not df.empty:
-            old_len = len(df)
-            df = df[df["is_tracked"] == True].copy()  # noqa: E712
-            print(f"[{_now_str()}] --rebuild-all: kept {len(df)} tournament rows, "
-                  f"dropped {old_len - len(df)} non-tournament rows")
-
-    # Show existing data summary
-    existing_spreads = df["closing_fg_spread"].notna().sum() if not df.empty else 0
-    existing_boxscore = df["team_fgm"].notna().sum() if not df.empty else 0
-    print(f"[{_now_str()}] Loaded {len(df)} existing rows "
-          f"({existing_spreads} with spreads, {existing_boxscore} with boxscore)")
-
-    # Show what we're about to do
-    flags = []
-    if args.rebuild_all:
-        flags.append("rebuild-all (full D1 re-scan)")
-    if args.backfill_odds:
-        if args.backfill_odds == "all":
-            flags.append("backfill-odds (ALL missing dates)")
+        # Phase 2: odds (tournament teams only)
+        if args.backfill_odds:
+            date_filter = None if args.backfill_odds == "all" else args.backfill_odds
+            if date_filter:
+                print(f"[{_now_str()}] Backfill mode: odds for {date_filter}")
+            else:
+                print(f"[{_now_str()}] Backfill mode: true opening/closing lines (all)")
+            df = phase2_backfill_odds(df, date_filter=date_filter)
         else:
-            flags.append(f"backfill-odds (date: {args.backfill_odds})")
-    if args.backfill_boxscore:
-        flags.append("backfill-boxscore")
-    if args.backfill_ranks:
-        flags.append("backfill-ranks")
-    if args.backfill_times:
-        flags.append("backfill-times")
-    if flags:
-        print(f"[{_now_str()}] Flags: {', '.join(flags)}")
-    else:
-        print(f"[{_now_str()}] Mode: daily incremental (new dates only)")
-    print()
+            df = phase2_fetch_odds(df, new_dates)
 
-    # Phase 1: new games (all D1 teams)
-    force_start = SEASON_START if args.rebuild_all else None
-    df, new_dates = phase1_fetch_games(
-        df, d1_team_ids, tournament_ids, d1_id_to_name, d1_conf_by_id,
-        force_start=force_start,
-    )
+        # Backfill boxscore stats for existing games
+        if args.backfill_boxscore:
+            print(f"[{_now_str()}] Backfilling boxscore data ...")
+            df = backfill_boxscore_data(df, d1_team_ids)
 
-    # Phase 2: odds (tournament teams only)
-    if args.backfill_odds:
-        date_filter = None if args.backfill_odds == "all" else args.backfill_odds
-        if date_filter:
-            print(f"[{_now_str()}] Backfill mode: odds for {date_filter}")
-        else:
-            print(f"[{_now_str()}] Backfill mode: true opening/closing lines (all)")
-        df = phase2_backfill_odds(df, date_filter=date_filter)
-    else:
-        df = phase2_fetch_odds(df, new_dates)
+        # Backfill AP ranks from scoreboards
+        if args.backfill_ranks:
+            print(f"[{_now_str()}] Backfilling AP ranks ...")
+            df = backfill_ap_ranks(df, tournament_ids, d1_id_to_name)
 
-    # Backfill boxscore stats for existing games
-    if args.backfill_boxscore:
-        print(f"[{_now_str()}] Backfilling boxscore data ...")
-        df = backfill_boxscore_data(df, d1_team_ids)
+        # Backfill commence times
+        if args.backfill_times:
+            print(f"[{_now_str()}] Backfilling commence times ...")
+            df = backfill_commence_times(df)
 
-    # Backfill AP ranks from scoreboards
-    if args.backfill_ranks:
-        print(f"[{_now_str()}] Backfilling AP ranks ...")
-        df = backfill_ap_ranks(df, tournament_ids, d1_id_to_name)
+        # Save after API phases (in case Phase 3/4 crash, data is safe)
+        save_game_logs(df)
 
-    # Backfill commence times
-    if args.backfill_times:
-        print(f"[{_now_str()}] Backfilling commence times ...")
-        df = backfill_commence_times(df)
+        # Phase 3: PIT stats (always recomputed, no API)
+        df = phase3_compute_pit(df, d1_team_ids)
 
-    # Save after API phases (in case Phase 3/4 crash, data is safe)
-    save_game_logs(df)
+        # Phase 4: export CSV
+        phase4_export_csv(df)
 
-    # Phase 3: PIT stats (always recomputed, no API)
-    df = phase3_compute_pit(df, d1_team_ids)
+        # Save final with PIT columns
+        save_game_logs(df)
 
-    # Phase 4: export CSV
-    phase4_export_csv(df)
+        # Rebuild odds history parquet from cache (no API calls)
+        rebuild_odds_history()
 
-    # Save final with PIT columns
-    save_game_logs(df)
+        tracked_df = df[df["is_tracked"] == True]  # noqa: E712
+        spread_count = tracked_df["closing_fg_spread"].notna().sum()
+        boxscore_count = df["team_fgm"].notna().sum()
+        opp_pit_filled = tracked_df["opp_games"].notna().sum()
+        print(f"\n{'=' * 60}")
+        print(f"  DONE! {len(df)} total rows ({len(tracked_df)} tracked), "
+              f"{df['team'].nunique()} teams")
+        print_odds_api_usage()
+        print(f"  Rows with spreads:  {spread_count}/{len(tracked_df)}")
+        print(f"  Rows with boxscore: {boxscore_count}/{len(df)}")
+        print(f"  Opp PIT filled:     {opp_pit_filled}/{len(tracked_df)}")
+        print(f"  Parquet: {PARQUET_FILE}")
+        print(f"  CSV:     {CSV_FILE}")
+        print(f"  Odds DB: {ODDS_HISTORY_FILE}")
+        print(f"{'=' * 60}")
 
-    # Rebuild odds history parquet from cache (no API calls)
-    rebuild_odds_history()
+    # Run once immediately
+    run_once()
 
-    tracked_df = df[df["is_tracked"] == True]  # noqa: E712
-    spread_count = tracked_df["closing_fg_spread"].notna().sum()
-    boxscore_count = df["team_fgm"].notna().sum()
-    opp_pit_filled = tracked_df["opp_games"].notna().sum()
-    print(f"\n{'=' * 60}")
-    print(f"  DONE! {len(df)} total rows ({len(tracked_df)} tracked), "
-          f"{df['team'].nunique()} teams")
-    print_odds_api_usage()
-    print(f"  Rows with spreads:  {spread_count}/{len(tracked_df)}")
-    print(f"  Rows with boxscore: {boxscore_count}/{len(df)}")
-    print(f"  Opp PIT filled:     {opp_pit_filled}/{len(tracked_df)}")
-    print(f"  Parquet: {PARQUET_FILE}")
-    print(f"  CSV:     {CSV_FILE}")
-    print(f"  Odds DB: {ODDS_HISTORY_FILE}")
-    print(f"{'=' * 60}")
+    # Loop mode: re-run on interval
+    if args.loop:
+        print(f"\n[{_now_str()}] Looping every {args.interval}s "
+              f"({args.interval // 3600}h). Ctrl+C to stop.")
+        while True:
+            time.sleep(args.interval)
+            try:
+                run_once()
+            except Exception as e:
+                print(f"  [{_now_str()}] Error during run: {e}")
 
 
 if __name__ == "__main__":
